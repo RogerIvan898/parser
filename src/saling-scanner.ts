@@ -174,7 +174,8 @@ function formatScopeEval(s: ScopedLotEvaluation): string {
   const d = Math.round(s.verdict.metrics.discountVsMedian * 100);
   const m = Math.round(s.verdict.metrics.netMargin * 100);
   const n = s.verdict.metrics.samples;
-  return `${s.scope}=${s.verdict.action}(Δ${d}% M${m}% n=${n})`;
+  const c = s.verdict.metrics.confidence;
+  return `${s.scope}=${s.verdict.action}(Δ${d}% M${m}% n=${n} ${c})`;
 }
 
 function logSalingLotAnalysis(

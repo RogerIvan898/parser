@@ -308,17 +308,39 @@ export function getCollectionStats(
   );
 }
 
-function confidenceForScope(
-  scope: StatsWithConfidence['scope'],
+/** Ниже этого срез не оцениваем (вердикт skip, не buy/watch). */
+export const MIN_SAMPLES_TO_EVALUATE = 10;
+
+/**
+ * Уверенность только от размера выборки, не от типа среза.
+ * < 10 — данных нет, вызывающий код должен ставить skip.
+ */
+export function confidenceFromSamples(
   samples: number,
 ): StatsWithConfidence['confidence'] {
-  if (scope === 'model+backdrop') {
-    return samples >= 10 ? 'high' : 'medium';
-  }
-  if (scope === 'model') {
-    return samples >= 10 ? 'medium' : 'low';
-  }
+  if (samples >= 100) return 'high';
+  if (samples >= 30) return 'medium';
   return 'low';
+}
+
+function confidenceForScope(
+  _scope: StatsWithConfidence['scope'],
+  samples: number,
+): StatsWithConfidence['confidence'] {
+  return confidenceFromSamples(samples);
+}
+
+function iqrRatioOf(stats: PriceStats): number | null {
+  if (stats.samples < 4 || stats.median <= 0) return null;
+  return (stats.p75 - stats.p25) / stats.median;
+}
+
+/** Мин. продаж/день от медианы среза (как на странице ликвидности). */
+function minSalesPerDayForSlice(medianTon: number): number {
+  if (medianTon <= 0) return 0.2;
+  if (medianTon < 10) return 0.5;
+  if (medianTon <= 100) return 0.2;
+  return 0.05;
 }
 
 export function getStatsSmart(
@@ -558,10 +580,10 @@ export function decide(
     salesPerDay,
   };
 
-  if (stats.samples < 3) {
+  if (stats.samples < MIN_SAMPLES_TO_EVALUATE) {
     return {
       action: 'skip',
-      reason: 'мало данных о продажах',
+      reason: `мало данных о продажах (${stats.samples}, нужно ≥ ${MIN_SAMPLES_TO_EVALUATE})`,
       metrics,
     };
   }
@@ -649,11 +671,11 @@ export function decideFromSales(
     salesPerDay,
   };
 
-  if (stats.samples < 3) {
+  if (stats.samples < MIN_SAMPLES_TO_EVALUATE) {
     return {
       action: 'skip',
       scope: stats.scope,
-      reason: `мало продаж по срезу «${slice}» (${stats.samples})`,
+      reason: `мало данных по срезу «${slice}» (${stats.samples} продаж, нужно ≥ ${MIN_SAMPLES_TO_EVALUATE})`,
       metrics,
     };
   }
@@ -662,7 +684,26 @@ export function decideFromSales(
   const marginPct = Math.round(margin * 100);
   const { buyMinDiscount, buyMinMargin, watchMinDiscount } =
     getSalesVerdictThresholds();
-  if (discount >= buyMinDiscount && margin >= buyMinMargin) {
+  const iqr = iqrRatioOf(stats);
+  const priceOk = discount >= buyMinDiscount && margin >= buyMinMargin;
+  if (priceOk && iqr !== null && iqr > 0.5) {
+    return {
+      action: 'skip',
+      scope: stats.scope,
+      reason: `разброс цен по срезу «${slice}» слишком большой (IQR/median ${iqr.toFixed(2)})`,
+      metrics,
+    };
+  }
+  const minPerDay = minSalesPerDayForSlice(referencePrice);
+  if (priceOk && salesPerDay < minPerDay) {
+    return {
+      action: 'skip',
+      scope: stats.scope,
+      reason: `неликвидный срез «${slice}»: ${salesPerDay.toFixed(2)} продаж/день, нужно ≥ ${minPerDay}`,
+      metrics,
+    };
+  }
+  if (priceOk) {
     return {
       action: 'buy',
       scope: stats.scope,
