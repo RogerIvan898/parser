@@ -155,6 +155,9 @@ function upsertDeal(store: ProfitDealsStore, record: ProfitDealRecord): boolean 
 
 export interface SalingScanStats {
   scanned: number;
+  /** Лотов, которых не было в прошлом ответе saling (проверка «кеша»/той же ленты) */
+  newVsPreviousScan: number;
+  repeatVsPreviousScan: number;
   /** Прошли фильтр включённых коллекций */
   analyzed: number;
   /** Вердикт buy (не все попадут в JSON — дедуп) */
@@ -168,6 +171,8 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
     retries: 2,
     timeoutMs: 25_000,
   });
+
+  const { newVsPrevious, repeatVsPrevious } = diffVsPreviousScan(res.gifts);
 
   const store = loadStore();
   let added = 0;
@@ -209,6 +214,8 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
 
   return {
     scanned: res.gifts.length,
+    newVsPreviousScan: newVsPrevious,
+    repeatVsPreviousScan: repeatVsPrevious,
     analyzed,
     buyVerdicts,
     added,
@@ -222,6 +229,27 @@ export function loadProfitDeals(limit = 100): ProfitDealsStore & { count: number
   return { ...store, deals, count: store.deals.length };
 }
 
+/** ID лотов из прошлого ответа POST /saling (только in-memory). */
+let previousSalingListingIds = new Set<string>();
+
+function diffVsPreviousScan(
+  gifts: Gift[],
+): { newVsPrevious: number; repeatVsPrevious: number } {
+  const ids = gifts.map((g) => g.id).filter(Boolean);
+  if (previousSalingListingIds.size === 0) {
+    previousSalingListingIds = new Set(ids);
+    return { newVsPrevious: ids.length, repeatVsPrevious: 0 };
+  }
+  let newVsPrevious = 0;
+  let repeatVsPrevious = 0;
+  for (const id of ids) {
+    if (previousSalingListingIds.has(id)) repeatVsPrevious++;
+    else newVsPrevious++;
+  }
+  previousSalingListingIds = new Set(ids);
+  return { newVsPrevious, repeatVsPrevious };
+}
+
 /** Фоновый цикл: опрос saling ~3 с ±1 с, пока включено в parse-config. */
 export async function runSalingScannerLoop(): Promise<void> {
   let wasOn = false;
@@ -229,10 +257,14 @@ export async function runSalingScannerLoop(): Promise<void> {
   for (;;) {
     const on = isSalingScannerEnabled();
     if (on && !wasOn) {
+      previousSalingListingIds = new Set();
       console.log(
         `[saling] сканер включён (лента новых лотов, ordering=None, count=20): ` +
           `~${SALING_SCANNER_INTERVAL_MS}ms ±${SALING_SCANNER_JITTER_MS}ms → ${PROFIT_DEALS_FILE}`,
       );
+    }
+    if (!on && wasOn) {
+      previousSalingListingIds = new Set();
     }
     wasOn = on;
 
@@ -244,9 +276,11 @@ export async function runSalingScannerLoop(): Promise<void> {
     try {
       const s = await scanSalingOnce();
       console.log(
-        `[saling] лента ${s.scanned} → анализ ${s.analyzed}, buy ${s.buyVerdicts}` +
+        `[saling] лента ${s.scanned} → новых vs прошлый опрос: ${s.newVsPreviousScan}` +
+          `, повтор: ${s.repeatVsPreviousScan}` +
+          ` | анализ ${s.analyzed}, buy ${s.buyVerdicts}` +
           (s.added > 0 ? `, +${s.added} в JSON` : '') +
-          `, всего в profit-deals: ${s.totalInFile} | API /api/profit-deals`,
+          ` | в файле: ${s.totalInFile}`,
       );
     } catch (err) {
       console.error('[saling] ошибка запроса:', err);
