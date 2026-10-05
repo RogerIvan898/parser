@@ -153,7 +153,17 @@ function upsertDeal(store: ProfitDealsStore, record: ProfitDealRecord): boolean 
   return true;
 }
 
-export async function scanSalingOnce(): Promise<{ scanned: number; added: number }> {
+export interface SalingScanStats {
+  scanned: number;
+  /** Прошли фильтр включённых коллекций */
+  analyzed: number;
+  /** Вердикт buy (не все попадут в JSON — дедуп) */
+  buyVerdicts: number;
+  added: number;
+  totalInFile: number;
+}
+
+export async function scanSalingOnce(): Promise<SalingScanStats> {
   const res = await fetchSalingWithRetry(makeSalingScannerFeedRequest(), {
     retries: 2,
     timeoutMs: 25_000,
@@ -161,6 +171,8 @@ export async function scanSalingOnce(): Promise<{ scanned: number; added: number
 
   const store = loadStore();
   let added = 0;
+  let analyzed = 0;
+  let buyVerdicts = 0;
 
   for (const gift of res.gifts) {
     const collection = gift.collectionName || gift.title;
@@ -169,6 +181,7 @@ export async function scanSalingOnce(): Promise<{ scanned: number; added: number
     const model = gift.modelName;
     if (!model) continue;
 
+    analyzed++;
     const listingTon = nanoToTon(gift.salePrice);
     const floorNano =
       gift.floorPriceNanoTONsByBackdropModel ??
@@ -187,13 +200,20 @@ export async function scanSalingOnce(): Promise<{ scanned: number; added: number
 
     if (verdict.action !== 'buy') continue;
 
+    buyVerdicts++;
     const record = giftToRecord(gift, verdict);
     if (upsertDeal(store, record)) added++;
   }
 
   if (added > 0) saveStore(store);
 
-  return { scanned: res.gifts.length, added };
+  return {
+    scanned: res.gifts.length,
+    analyzed,
+    buyVerdicts,
+    added,
+    totalInFile: store.deals.length,
+  };
 }
 
 export function loadProfitDeals(limit = 100): ProfitDealsStore & { count: number } {
@@ -222,10 +242,12 @@ export async function runSalingScannerLoop(): Promise<void> {
     }
 
     try {
-      const { scanned, added } = await scanSalingOnce();
-      if (added > 0) {
-        console.log(`[saling] +${added} выгодных лотов (просмотрено ${scanned})`);
-      }
+      const s = await scanSalingOnce();
+      console.log(
+        `[saling] лента ${s.scanned} → анализ ${s.analyzed}, buy ${s.buyVerdicts}` +
+          (s.added > 0 ? `, +${s.added} в JSON` : '') +
+          `, всего в profit-deals: ${s.totalInFile} | API /api/profit-deals`,
+      );
     } catch (err) {
       console.error('[saling] ошибка запроса:', err);
     }
