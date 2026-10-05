@@ -11,19 +11,12 @@
 3. **Главный файл** — укажи **`server.js`** (в корне), не `dist/server.js`.  
    Скрипт при старте выполнит `npm run build:all`, если `dist` ещё нет.
 
-Если платформа всё равно жёстко запускает `node dist/server.js` — в настройках команды запуска поставь:
+Команда запуска: **`npm start`** или **`node server.js`**.
 
-```bash
-npm run build:all && node dist/server.js
-```
+При первом старте `server.js` сам выполнит `npm install` (корень + `web/`) и соберёт `dist/`, если их нет.  
+**Не** указывай `dist/server.js` — без сборки файла не будет.
 
-или:
-
-```bash
-npm start
-```
-
-(`npm start` → `node server.js` → сборка + API)
+С Dockerfile UI и API собираются в образе; `server.js` только запускает уже готовый `dist/server.js`.
 
 ## Переменные
 
