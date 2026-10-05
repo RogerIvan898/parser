@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Fastify from 'fastify';
+import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import {
   initClient,
@@ -78,14 +78,9 @@ function requireString(
 
 const app = Fastify({ logger: true });
 
-app.addHook('onRequest', async (request) => {
-  const url = request.raw.url ?? '';
-  if (url === '/api' || url.startsWith('/api/') || url.startsWith('/api?')) {
-    request.raw.url = url.replace(/^\/api/, '') || '/';
-  }
-});
-
-app.get('/health', async (_req, reply) => {
+/** Только под /api — иначе GET /history, /stats … перехватывает API вместо SPA. */
+function registerApiRoutes(api: FastifyInstance): void {
+api.get('/health', async (_req, reply) => {
   return reply.send({ ok: true });
 });
 
@@ -95,7 +90,7 @@ function catalogNeedsModelHydrate(catalog: ReturnType<typeof loadCatalog>): bool
   return cols.every((c) => (catalog.collections[c]?.length ?? 0) === 0);
 }
 
-app.get('/catalog', async (_req, reply) => {
+api.get('/catalog', async (_req, reply) => {
   try {
     if (listCatalogCollections(loadCatalog()).length === 0) {
       await ensureCatalogCollectionsFromApi();
@@ -148,7 +143,7 @@ app.get('/catalog', async (_req, reply) => {
   }
 });
 
-app.get('/parse-config', async (_req, reply) => {
+api.get('/parse-config', async (_req, reply) => {
   try {
     const catalog = loadCatalog();
     const collections = listCatalogCollections(catalog);
@@ -164,7 +159,7 @@ app.get('/parse-config', async (_req, reply) => {
   }
 });
 
-app.put('/parse-config', async (req, reply) => {
+api.put('/parse-config', async (req, reply) => {
   const body = req.body as {
     enabledCollections?: unknown;
     historyFetchBackdrops?: unknown;
@@ -203,7 +198,7 @@ function parseMinConfidence(
   return null;
 }
 
-app.get('/liquidity', async (req, reply) => {
+api.get('/liquidity', async (req, reply) => {
   const q = req.query as Record<string, unknown>;
   const days = parsePositiveInt(q.days, 7);
   const limitRaw = q.limit;
@@ -222,7 +217,7 @@ app.get('/liquidity', async (req, reply) => {
   }
 });
 
-app.get('/stats', async (req, reply) => {
+api.get('/stats', async (req, reply) => {
   const q = req.query as Record<string, unknown>;
   const collection = requireString(q.collection, 'collection');
   const model = requireString(q.model, 'model');
@@ -239,7 +234,7 @@ app.get('/stats', async (req, reply) => {
   }
 });
 
-app.get('/stats/backdrop', async (req, reply) => {
+api.get('/stats/backdrop', async (req, reply) => {
   const q = req.query as Record<string, unknown>;
   const collection = requireString(q.collection, 'collection');
   const model = requireString(q.model, 'model');
@@ -259,7 +254,7 @@ app.get('/stats/backdrop', async (req, reply) => {
   }
 });
 
-app.get('/history', async (req, reply) => {
+api.get('/history', async (req, reply) => {
   const q = req.query as Record<string, unknown>;
   const collection = requireString(q.collection, 'collection');
   if (!collection) {
@@ -297,7 +292,7 @@ interface EvaluateBody {
   feeRate?: number;
 }
 
-app.post('/evaluate', async (req, reply) => {
+api.post('/evaluate', async (req, reply) => {
   const body = req.body as EvaluateBody;
   const collection = requireString(body.collection, 'collection');
   const model = requireString(body.model, 'model');
@@ -341,7 +336,7 @@ interface DecideBody {
   feeRate?: number;
 }
 
-app.post('/decide', async (req, reply) => {
+api.post('/decide', async (req, reply) => {
   const body = req.body as DecideBody;
   const collection = requireString(body.collection, 'collection');
   const model =
@@ -376,7 +371,7 @@ app.post('/decide', async (req, reply) => {
   }
 });
 
-app.get('/item/:id', async (req, reply) => {
+api.get('/item/:id', async (req, reply) => {
   const { id } = req.params as { id: string };
   if (!id) {
     return reply.code(400).send({ error: 'id обязателен' });
@@ -400,7 +395,7 @@ app.get('/item/:id', async (req, reply) => {
   }
 });
 
-app.get('/deals', async (req, reply) => {
+api.get('/deals', async (req, reply) => {
   const q = req.query as Record<string, unknown>;
   const collection = requireString(q.collection, 'collection');
   if (!collection) {
@@ -481,6 +476,9 @@ app.get('/deals', async (req, reply) => {
     return reply.code(500).send({ error: (err as Error).message });
   }
 });
+}
+
+app.register(registerApiRoutes, { prefix: '/api' });
 
 function bootstrapMrktDb(): void {
   if (countCollectionPriceRows() === 0) {
