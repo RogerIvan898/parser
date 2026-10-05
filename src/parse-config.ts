@@ -4,6 +4,12 @@ import { DATA_DIR } from './store.js';
 
 export const PARSE_CONFIG_FILE = resolve(DATA_DIR, 'parse-config.json');
 
+export interface ParserTiming {
+  delayMs: number;
+  feedPages: number;
+  historyRoundMs: number;
+}
+
 export interface ParseConfig {
   version: 1;
   updatedAt: string;
@@ -14,6 +20,10 @@ export interface ParseConfig {
   enabledCollections: string[] | null;
   /** parse --history: доп. POST /feed по фонам из HISTORY_FEED_BACKDROP_NAMES */
   historyFetchBackdrops: boolean;
+  /** null — брать из env (PARSER_DELAY_MS и т.д.) */
+  parserDelayMs: number | null;
+  parserFeedPages: number | null;
+  parserHistoryRoundMs: number | null;
 }
 
 /** Фоны для доп. запросов history (не весь catalog.json). */
@@ -29,6 +39,43 @@ function emptyConfig(): ParseConfig {
     updatedAt: new Date().toISOString(),
     enabledCollections: null,
     historyFetchBackdrops: true,
+    parserDelayMs: null,
+    parserFeedPages: null,
+    parserHistoryRoundMs: null,
+  };
+}
+
+function parseOptionalPositiveInt(
+  value: unknown,
+  min: number,
+  max: number,
+): number | null {
+  if (value === undefined || value === null) return null;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const v = Math.floor(n);
+  if (v < min || v > max) return null;
+  return v;
+}
+
+/** Дефолты из переменных окружения (при старте контейнера). */
+export function getParserEnvDefaults(): ParserTiming {
+  const delayMs = Number(process.env.PARSER_DELAY_MS) || 400;
+  return {
+    delayMs,
+    feedPages: Number(process.env.PARSER_FEED_PAGES) || 5,
+    historyRoundMs: Number(process.env.PARSER_HISTORY_ROUND_MS) || delayMs * 3,
+  };
+}
+
+/** Актуальные значения: env + переопределение из data/parse-config.json (читается на каждый sleep). */
+export function getParserTiming(): ParserTiming {
+  const env = getParserEnvDefaults();
+  const cfg = loadParseConfig();
+  return {
+    delayMs: cfg.parserDelayMs ?? env.delayMs,
+    feedPages: cfg.parserFeedPages ?? env.feedPages,
+    historyRoundMs: cfg.parserHistoryRoundMs ?? env.historyRoundMs,
   };
 }
 
@@ -45,6 +92,13 @@ function normalizeConfig(raw: Partial<ParseConfig>): ParseConfig {
             )
           : null,
     historyFetchBackdrops: raw.historyFetchBackdrops !== false,
+    parserDelayMs: parseOptionalPositiveInt(raw.parserDelayMs, 50, 60_000),
+    parserFeedPages: parseOptionalPositiveInt(raw.parserFeedPages, 1, 50),
+    parserHistoryRoundMs: parseOptionalPositiveInt(
+      raw.parserHistoryRoundMs,
+      0,
+      3_600_000,
+    ),
   };
 }
 
@@ -74,6 +128,9 @@ function writeParseConfig(cfg: ParseConfig): void {
 export interface SaveParseConfigInput {
   enabledCollections: string[];
   historyFetchBackdrops?: boolean;
+  parserDelayMs?: number | null;
+  parserFeedPages?: number | null;
+  parserHistoryRoundMs?: number | null;
 }
 
 export function saveParseConfig(input: SaveParseConfigInput): void {
@@ -81,12 +138,31 @@ export function saveParseConfig(input: SaveParseConfigInput): void {
   const unique = [
     ...new Set(input.enabledCollections.map((s) => s.trim()).filter(Boolean)),
   ].sort((a, b) => a.localeCompare(b, 'ru'));
-  writeParseConfig({
+  const next: ParseConfig = {
     ...prev,
     enabledCollections: unique,
     historyFetchBackdrops:
       input.historyFetchBackdrops ?? prev.historyFetchBackdrops,
-  });
+  };
+  if (input.parserDelayMs !== undefined) {
+    next.parserDelayMs =
+      input.parserDelayMs === null
+        ? null
+        : parseOptionalPositiveInt(input.parserDelayMs, 50, 60_000);
+  }
+  if (input.parserFeedPages !== undefined) {
+    next.parserFeedPages =
+      input.parserFeedPages === null
+        ? null
+        : parseOptionalPositiveInt(input.parserFeedPages, 1, 50);
+  }
+  if (input.parserHistoryRoundMs !== undefined) {
+    next.parserHistoryRoundMs =
+      input.parserHistoryRoundMs === null
+        ? null
+        : parseOptionalPositiveInt(input.parserHistoryRoundMs, 0, 3_600_000);
+  }
+  writeParseConfig(next);
 }
 
 export function isCollectionEnabledForParse(collectionName: string): boolean {

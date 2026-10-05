@@ -38,6 +38,9 @@ export function Settings() {
   );
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [historyFetchBackdrops, setHistoryFetchBackdrops] = useState(true);
+  const [localDelayMs, setLocalDelayMs] = useState('400');
+  const [localFeedPages, setLocalFeedPages] = useState('5');
+  const [localHistoryRoundMs, setLocalHistoryRoundMs] = useState('1200');
   const [parseDirty, setParseDirty] = useState(false);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -54,6 +57,9 @@ export function Settings() {
       ),
     );
     setHistoryFetchBackdrops(parseQuery.data.historyFetchBackdrops);
+    setLocalDelayMs(String(parseQuery.data.parserDelayMs));
+    setLocalFeedPages(String(parseQuery.data.parserFeedPages));
+    setLocalHistoryRoundMs(String(parseQuery.data.parserHistoryRoundMs));
   }, [parseQuery.data, parseDirty]);
 
   const allSelected = useMemo(
@@ -89,11 +95,26 @@ export function Settings() {
         : defaultFeeRate,
     );
     try {
+      const delayMs = Math.min(
+        60_000,
+        Math.max(50, Math.floor(Number(localDelayMs) || 400)),
+      );
+      const feedPages = Math.min(
+        50,
+        Math.max(1, Math.floor(Number(localFeedPages) || 5)),
+      );
+      const historyRoundMs = Math.min(
+        3_600_000,
+        Math.max(0, Math.floor(Number(localHistoryRoundMs) || 0)),
+      );
       await saveParseConfig({
         enabledCollections: [...checked].sort((a, b) =>
           a.localeCompare(b, 'ru'),
         ),
         historyFetchBackdrops,
+        parserDelayMs: delayMs,
+        parserFeedPages: feedPages,
+        parserHistoryRoundMs: historyRoundMs,
       });
       setParseDirty(false);
       await parseQuery.refetch();
@@ -137,6 +158,64 @@ export function Settings() {
             />
           </div>
         </div>
+      </div>
+
+      <div className="card">
+        <h2 style={{ marginTop: 0, fontSize: 16 }}>Скорость парсера</h2>
+        <p style={{ color: 'var(--text-dim)', marginTop: 0 }}>
+          Применяется на сервере между запросами к MRKT (автопарсер на
+          Bothost). Перезапуск не нужен — после «Сохранить» следующая пауза
+          уже с новыми значениями.
+        </p>
+        <div className="form-row">
+          <div className="form-field">
+            <label>Пауза между запросами, мс</label>
+            <input
+              type="number"
+              min={50}
+              max={60000}
+              value={localDelayMs}
+              onChange={(e) => {
+                setParseDirty(true);
+                setLocalDelayMs(e.target.value);
+              }}
+            />
+          </div>
+          <div className="form-field">
+            <label>Страниц /feed на модель</label>
+            <input
+              type="number"
+              min={1}
+              max={50}
+              value={localFeedPages}
+              onChange={(e) => {
+                setParseDirty(true);
+                setLocalFeedPages(e.target.value);
+              }}
+            />
+          </div>
+          <div className="form-field">
+            <label>Пауза между кругами истории, мс</label>
+            <input
+              type="number"
+              min={0}
+              max={3600000}
+              value={localHistoryRoundMs}
+              onChange={(e) => {
+                setParseDirty(true);
+                setLocalHistoryRoundMs(e.target.value);
+              }}
+            />
+          </div>
+        </div>
+        {parseQuery.data?.parserEnvDefaults && (
+          <p style={{ color: 'var(--text-dim)', fontSize: 12, marginBottom: 0 }}>
+            Дефолты из env на сервере: delay{' '}
+            {parseQuery.data.parserEnvDefaults.delayMs}, pages{' '}
+            {parseQuery.data.parserEnvDefaults.feedPages}, круг{' '}
+            {parseQuery.data.parserEnvDefaults.historyRoundMs} мс.
+          </p>
+        )}
       </div>
 
       <div className="card">

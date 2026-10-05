@@ -52,6 +52,7 @@ import {
   isHistoryFetchBackdropsEnabled,
   getHistoryFeedBackdropNames,
   countEnabledForParse,
+  getParserTiming,
 } from './parse-config.js';
 import {
   findResumeIndex,
@@ -60,12 +61,13 @@ import {
   HISTORY_PROGRESS_FILE,
 } from './history-progress.js';
 
-const DELAY_MS = Number(process.env.PARSER_DELAY_MS) || 400;
 const FEED_TIMEOUT_MS = Number(process.env.PARSER_FEED_TIMEOUT_MS) || 60_000;
 /** MRKT POST /feed отдаёт не больше 20 items, даже при count=100 */
 export const FEED_API_PAGE_SIZE = 20;
-const DEFAULT_FEED_PAGES_PER_MODEL =
-  Number(process.env.PARSER_FEED_PAGES) || 5;
+
+function parserDelayMs(): number {
+  return getParserTiming().delayMs;
+}
 
 function argValue(flag: string): string | undefined {
   const i = process.argv.indexOf(flag);
@@ -89,7 +91,7 @@ export function parseHistoryFeedConfig(): HistoryFeedConfig {
   const feedCountRaw = argValue('--feed-count');
 
   let maxItemsPerModel =
-    DEFAULT_FEED_PAGES_PER_MODEL * FEED_API_PAGE_SIZE;
+    getParserTiming().feedPages * FEED_API_PAGE_SIZE;
 
   if (bulk) {
     maxItemsPerModel = 100;
@@ -210,7 +212,7 @@ async function syncModelFeedPages(
       break;
     }
 
-    if (fetched < maxItems) await sleep(DELAY_MS);
+    if (fetched < maxItems) await sleep(parserDelayMs());
   }
 
   return totalAdded;
@@ -254,7 +256,7 @@ async function syncModelFeed(
       FEED_API_PAGE_SIZE,
       false,
     );
-    await sleep(DELAY_MS);
+    await sleep(parserDelayMs());
   }
 
   return totalAdded;
@@ -387,7 +389,7 @@ async function syncCatalogAndMarket(writeMarket: boolean): Promise<void> {
       recordParseError('models', name, err);
     }
 
-    await sleep(DELAY_MS);
+    await sleep(parserDelayMs());
   }
 
   console.log(
@@ -454,8 +456,7 @@ async function syncFeed(feed: HistoryFeedConfig): Promise<void> {
   }
 
   const database = openHistoryDb();
-  const pauseBetweenRounds =
-    Number(process.env.PARSER_HISTORY_ROUND_MS) || DELAY_MS * 3;
+  const pauseBetweenRounds = () => getParserTiming().historyRoundMs;
 
   console.log(`[history] SQLite: ${HISTORY_DB_FILE}`);
   console.log(
@@ -510,7 +511,7 @@ async function syncFeed(feed: HistoryFeedConfig): Promise<void> {
           modelName: next.modelName,
         });
 
-        if (hasNext) await sleep(DELAY_MS);
+        if (hasNext) await sleep(parserDelayMs());
       }
 
       grandTotal += roundAdded;
@@ -519,8 +520,9 @@ async function syncFeed(feed: HistoryFeedConfig): Promise<void> {
       );
       index = 0;
       round += 1;
-      console.log(`[history] пауза ${pauseBetweenRounds} ms...`);
-      await sleep(pauseBetweenRounds);
+      const roundPause = pauseBetweenRounds();
+      console.log(`[history] пауза ${roundPause} ms...`);
+      await sleep(roundPause);
     }
   } finally {
     closeHistoryDb();
@@ -541,7 +543,7 @@ export async function runCatalogThenHistory(): Promise<void> {
     );
   } else {
     console.log(
-      `[parser] шаг 1/2: коллекции и модели каталога (delay=${DELAY_MS}ms)`,
+      `[parser] шаг 1/2: коллекции и модели каталога (delay=${parserDelayMs()}ms)`,
     );
     await syncCatalogAndMarket(true);
   }
@@ -573,11 +575,11 @@ async function main(): Promise<void> {
   console.log('=== MRKT parser ===');
   if (historyMode) {
     console.log(
-      `[config] delay=${DELAY_MS}ms, feed maxItems/model=${historyFeed.maxItemsPerModel}, ` +
+      `[config] delay=${parserDelayMs()}ms, feed maxItems/model=${historyFeed.maxItemsPerModel}, ` +
         `from=${historyFeed.startFrom}`,
     );
   } else {
-    console.log(`[config] delay=${DELAY_MS}ms`);
+    console.log(`[config] delay=${parserDelayMs()}ms`);
   }
 
   try {

@@ -97,12 +97,22 @@ export async function evaluateListing(payload: {
   return data;
 }
 
+export interface ParserTimingResponse {
+  delayMs: number;
+  feedPages: number;
+  historyRoundMs: number;
+}
+
 export interface ParseConfigResponse {
   collections: string[];
   /** null = парсить все (ещё не сохраняли выбор) */
   enabledCollections: string[] | null;
   historyFetchBackdrops: boolean;
   historyFeedBackdropNames: string[];
+  parserDelayMs: number;
+  parserFeedPages: number;
+  parserHistoryRoundMs: number;
+  parserEnvDefaults?: ParserTimingResponse;
 }
 
 export async function getLiquidity(days: number) {
@@ -120,12 +130,19 @@ export async function getParseConfig(): Promise<ParseConfigResponse> {
       'Black',
       'Onyx Black',
     ],
+    parserDelayMs: Number(data.parserDelayMs) || 400,
+    parserFeedPages: Number(data.parserFeedPages) || 5,
+    parserHistoryRoundMs: Number(data.parserHistoryRoundMs) || 1200,
+    parserEnvDefaults: data.parserEnvDefaults,
   };
 }
 
 export async function saveParseConfig(payload: {
   enabledCollections: string[];
   historyFetchBackdrops: boolean;
+  parserDelayMs?: number;
+  parserFeedPages?: number;
+  parserHistoryRoundMs?: number;
 }) {
   const { data } = await api.put('/parse-config', payload);
   return data;

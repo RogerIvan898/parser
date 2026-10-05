@@ -42,6 +42,8 @@ import {
   loadParseConfig,
   saveParseConfig,
   HISTORY_FEED_BACKDROP_NAMES,
+  getParserTiming,
+  getParserEnvDefaults,
 } from './parse-config.js';
 import { listLiquidItems } from './db/liquidity.js';
 import { ensureCatalogCollectionsFromApi } from './catalog-bootstrap.js';
@@ -148,11 +150,17 @@ api.get('/parse-config', async (_req, reply) => {
     const catalog = loadCatalog();
     const collections = listCatalogCollections(catalog);
     const cfg = loadParseConfig();
+    const timing = getParserTiming();
+    const envDefaults = getParserEnvDefaults();
     return reply.send({
       collections,
       enabledCollections: cfg.enabledCollections,
       historyFetchBackdrops: cfg.historyFetchBackdrops,
       historyFeedBackdropNames: [...HISTORY_FEED_BACKDROP_NAMES],
+      parserDelayMs: timing.delayMs,
+      parserFeedPages: timing.feedPages,
+      parserHistoryRoundMs: timing.historyRoundMs,
+      parserEnvDefaults: envDefaults,
     });
   } catch (err) {
     return reply.code(500).send({ error: (err as Error).message });
@@ -163,6 +171,9 @@ api.put('/parse-config', async (req, reply) => {
   const body = req.body as {
     enabledCollections?: unknown;
     historyFetchBackdrops?: unknown;
+    parserDelayMs?: unknown;
+    parserFeedPages?: unknown;
+    parserHistoryRoundMs?: unknown;
   };
   if (!Array.isArray(body.enabledCollections)) {
     return reply
@@ -176,13 +187,58 @@ api.put('/parse-config', async (req, reply) => {
     body.historyFetchBackdrops === undefined
       ? undefined
       : Boolean(body.historyFetchBackdrops);
+  const parseNum = (
+    value: unknown,
+    min: number,
+    max: number,
+  ): number | null | undefined => {
+    if (value === undefined) return undefined;
+    if (value === null) return null;
+    const n = Number(value);
+    if (!Number.isFinite(n)) return undefined;
+    const v = Math.floor(n);
+    if (v < min || v > max) return undefined;
+    return v;
+  };
+  const parserDelayMs = parseNum(body.parserDelayMs, 50, 60_000);
+  const parserFeedPages = parseNum(body.parserFeedPages, 1, 50);
+  const parserHistoryRoundMs = parseNum(body.parserHistoryRoundMs, 0, 3_600_000);
+  if (
+    body.parserDelayMs !== undefined &&
+    parserDelayMs === undefined
+  ) {
+    return reply.code(400).send({ error: 'parserDelayMs: 50–60000' });
+  }
+  if (
+    body.parserFeedPages !== undefined &&
+    parserFeedPages === undefined
+  ) {
+    return reply.code(400).send({ error: 'parserFeedPages: 1–50' });
+  }
+  if (
+    body.parserHistoryRoundMs !== undefined &&
+    parserHistoryRoundMs === undefined
+  ) {
+    return reply.code(400).send({ error: 'parserHistoryRoundMs: 0–3600000' });
+  }
+
   try {
-    saveParseConfig({ enabledCollections: enabled, historyFetchBackdrops });
+    saveParseConfig({
+      enabledCollections: enabled,
+      historyFetchBackdrops,
+      parserDelayMs,
+      parserFeedPages,
+      parserHistoryRoundMs,
+    });
     const cfg = loadParseConfig();
+    const timing = getParserTiming();
     return reply.send({
       ok: true,
       enabledCollections: cfg.enabledCollections,
       historyFetchBackdrops: cfg.historyFetchBackdrops,
+      parserDelayMs: timing.delayMs,
+      parserFeedPages: timing.feedPages,
+      parserHistoryRoundMs: timing.historyRoundMs,
     });
   } catch (err) {
     return reply.code(500).send({ error: (err as Error).message });
