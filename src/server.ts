@@ -50,6 +50,8 @@ import {
   SALING_SCANNER_JITTER_MS,
   getParseFeeRate,
   DEFAULT_FEE_RATE,
+  getSalesVerdictThresholds,
+  DEFAULT_SALES_VERDICT_THRESHOLDS,
 } from './parse-config.js';
 import { loadProfitDeals } from './saling-scanner.js';
 import { listLiquidItems } from './db/liquidity.js';
@@ -179,6 +181,8 @@ api.get('/parse-config', async (_req, reply) => {
       },
       feeRate: getParseFeeRate(),
       defaultFeeRate: DEFAULT_FEE_RATE,
+      salesVerdictThresholds: getSalesVerdictThresholds(),
+      defaultSalesVerdictThresholds: DEFAULT_SALES_VERDICT_THRESHOLDS,
     });
   } catch (err) {
     return reply.code(500).send({ error: (err as Error).message });
@@ -194,6 +198,9 @@ api.put('/parse-config', async (req, reply) => {
     parserHistoryRoundMs?: unknown;
     salingScannerEnabled?: unknown;
     feeRate?: unknown;
+    buyMinDiscount?: unknown;
+    buyMinMargin?: unknown;
+    watchMinDiscount?: unknown;
   };
   if (!Array.isArray(body.enabledCollections)) {
     return reply
@@ -259,6 +266,26 @@ api.put('/parse-config', async (req, reply) => {
     }
   }
 
+  const parseThreshold = (value: unknown): number | null | undefined => {
+    if (value === undefined) return undefined;
+    if (value === null) return null;
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0 || n >= 1) return undefined;
+    return n;
+  };
+  const buyMinDiscount = parseThreshold(body.buyMinDiscount);
+  const buyMinMargin = parseThreshold(body.buyMinMargin);
+  const watchMinDiscount = parseThreshold(body.watchMinDiscount);
+  if (body.buyMinDiscount !== undefined && buyMinDiscount === undefined) {
+    return reply.code(400).send({ error: 'buyMinDiscount: 0–1 (доля)' });
+  }
+  if (body.buyMinMargin !== undefined && buyMinMargin === undefined) {
+    return reply.code(400).send({ error: 'buyMinMargin: 0–1 (доля)' });
+  }
+  if (body.watchMinDiscount !== undefined && watchMinDiscount === undefined) {
+    return reply.code(400).send({ error: 'watchMinDiscount: 0–1 (доля)' });
+  }
+
   try {
     saveParseConfig({
       enabledCollections: enabled,
@@ -268,6 +295,9 @@ api.put('/parse-config', async (req, reply) => {
       parserHistoryRoundMs,
       salingScannerEnabled,
       feeRate: feeRateSave,
+      buyMinDiscount,
+      buyMinMargin,
+      watchMinDiscount,
     });
     const cfg = loadParseConfig();
     const timing = getParserTiming();
@@ -280,6 +310,7 @@ api.put('/parse-config', async (req, reply) => {
       parserHistoryRoundMs: timing.historyRoundMs,
       salingScannerEnabled: cfg.salingScannerEnabled,
       feeRate: getParseFeeRate(),
+      salesVerdictThresholds: getSalesVerdictThresholds(),
     });
   } catch (err) {
     return reply.code(500).send({ error: (err as Error).message });

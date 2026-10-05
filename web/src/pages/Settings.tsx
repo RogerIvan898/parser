@@ -42,6 +42,9 @@ export function Settings() {
   const [localFeedPages, setLocalFeedPages] = useState('5');
   const [localHistoryRoundMs, setLocalHistoryRoundMs] = useState('1200');
   const [salingScannerEnabled, setSalingScannerEnabled] = useState(false);
+  const [buyDiscountPct, setBuyDiscountPct] = useState('8');
+  const [buyMarginPct, setBuyMarginPct] = useState('4');
+  const [watchDiscountPct, setWatchDiscountPct] = useState('4');
   const [parseDirty, setParseDirty] = useState(false);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -65,6 +68,10 @@ export function Settings() {
     const fee = parseQuery.data.feeRate ?? 0.02;
     setLocalFeePercent(String(feePercentFromRate(fee)));
     setDefaultFeeRate(fee);
+    const t = parseQuery.data.salesVerdictThresholds;
+    setBuyDiscountPct(String(feePercentFromRate(t.buyMinDiscount)));
+    setBuyMarginPct(String(feePercentFromRate(t.buyMinMargin)));
+    setWatchDiscountPct(String(feePercentFromRate(t.watchMinDiscount)));
   }, [parseQuery.data, parseDirty, setDefaultFeeRate]);
 
   const allSelected = useMemo(
@@ -111,6 +118,9 @@ export function Settings() {
         3_600_000,
         Math.max(0, Math.floor(Number(localHistoryRoundMs) || 0)),
       );
+      const buyMinDiscount = feeRateFromPercent(Number(buyDiscountPct) || 8);
+      const buyMinMargin = feeRateFromPercent(Number(buyMarginPct) || 4);
+      const watchMinDiscount = feeRateFromPercent(Number(watchDiscountPct) || 4);
       await saveParseConfig({
         enabledCollections: [...checked].sort((a, b) =>
           a.localeCompare(b, 'ru'),
@@ -121,6 +131,9 @@ export function Settings() {
         parserHistoryRoundMs: historyRoundMs,
         salingScannerEnabled,
         feeRate,
+        buyMinDiscount,
+        buyMinMargin,
+        watchMinDiscount,
       });
       setParseDirty(false);
       await parseQuery.refetch();
@@ -142,7 +155,7 @@ export function Settings() {
         <p style={{ color: 'var(--text-dim)', marginTop: 0 }}>
           Дней — для оценки в UI. Комиссия сохраняется на сервере (
           <code>parse-config.json</code>): saling-сканер, <code>/deals</code>,
-          оценка по умолчанию. По умолчанию <b>2%</b>.
+          saling, все 4 среза. Комиссия по умолчанию <b>2%</b>.
         </p>
         <div className="form-row">
           <div className="form-field">
@@ -169,6 +182,54 @@ export function Settings() {
             />
           </div>
         </div>
+        <p style={{ color: 'var(--text-dim)', fontSize: 13, margin: '16px 0 8px' }}>
+          Пороги <code>buy</code> / <code>watch</code> (доля от медианы и маржа после
+          комиссии). Дефолт: buy 8% / 4%, watch 4%.
+        </p>
+        <div className="form-row">
+          <div className="form-field">
+            <label>Buy: дисконт к медиане, %</label>
+            <input
+              type="number"
+              min={0}
+              max={95}
+              step={0.5}
+              value={buyDiscountPct}
+              onChange={(e) => {
+                setParseDirty(true);
+                setBuyDiscountPct(e.target.value);
+              }}
+            />
+          </div>
+          <div className="form-field">
+            <label>Buy: маржа после комиссии, %</label>
+            <input
+              type="number"
+              min={0}
+              max={95}
+              step={0.5}
+              value={buyMarginPct}
+              onChange={(e) => {
+                setParseDirty(true);
+                setBuyMarginPct(e.target.value);
+              }}
+            />
+          </div>
+          <div className="form-field">
+            <label>Watch: дисконт к медиане, %</label>
+            <input
+              type="number"
+              min={0}
+              max={95}
+              step={0.5}
+              value={watchDiscountPct}
+              onChange={(e) => {
+                setParseDirty(true);
+                setWatchDiscountPct(e.target.value);
+              }}
+            />
+          </div>
+        </div>
       </div>
 
       <div className="card">
@@ -191,9 +252,9 @@ export function Settings() {
         <p style={{ color: 'var(--text-dim)', fontSize: 13, margin: '8px 0 0' }}>
           Включено: история/модели — пауза <b>5 с</b>, saling — ~<b>3 с</b> ±{' '}
           <b>1 с</b>. Запрос без фильтров, <code>ordering: None</code>,{' '}
-          <code>count: 20</code> — в ответе <b>недавно выставленные</b> лоты (лента
-          MRKT), не поиск самых дешёвых. Вердикт <code>buy</code> + ликвидность из{' '}
-          <code>mrkt.db</code>; только отмеченные коллекции.{' '}
+          <code>count: 20</code> — <b>недавно выставленные</b> лоты. По каждому —
+          4 среза (коллекция / модель / фон / модель+фон) как в «Оценке»; в JSON при{' '}
+          <code>buy</code> на любом срезе. Только отмеченные коллекции.{' '}
           <code>GET /api/profit-deals</code>.
         </p>
       </div>

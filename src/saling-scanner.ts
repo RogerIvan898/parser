@@ -6,7 +6,11 @@ import {
 } from './client.js';
 import type { Gift } from './types.js';
 import { nanoToTon, formatTon } from './types.js';
-import { decide, type DealVerdict } from './db/analytics.js';
+import {
+  evaluateLotAllScopes,
+  type DealVerdict,
+  type ScopedLotEvaluation,
+} from './db/analytics.js';
 import { getModelLiquiditySnapshot } from './db/liquidity.js';
 import {
   isSalingScannerEnabled,
@@ -39,6 +43,15 @@ export interface ProfitDealLiquidity {
   trend: number | null;
 }
 
+export interface ProfitDealScopeEval {
+  scope: string;
+  model: string | null;
+  backdrop: string | null;
+  action: DealVerdict['action'];
+  reason: string;
+  metrics: DealVerdict['metrics'];
+}
+
 export interface ProfitDealRecord {
   detectedAt: string;
   listingId: string;
@@ -51,10 +64,16 @@ export interface ProfitDealRecord {
   number: number;
   priceTon: number;
   priceFormatted: string;
+  /** Все срезы: коллекция; кол+модель; кол+фон; кол+модель+фон */
+  evaluations: ProfitDealScopeEval[];
+  /** Срезы с вердиктом buy */
+  buyScopes: string[];
+  /** Лучший buy по чистой марже */
   verdict: {
     action: DealVerdict['action'];
     reason: string;
     metrics: DealVerdict['metrics'];
+    scope: string;
   };
   liquidity: ProfitDealLiquidity | null;
 }
@@ -98,11 +117,29 @@ function saveStore(store: ProfitDealsStore): void {
   writeFileSync(PROFIT_DEALS_FILE, JSON.stringify(store, null, 2), 'utf-8');
 }
 
-function giftToRecord(gift: Gift, verdict: DealVerdict): ProfitDealRecord {
+function giftToRecord(
+  gift: Gift,
+  scoped: ScopedLotEvaluation[],
+  bestBuy: ScopedLotEvaluation,
+): ProfitDealRecord {
   const collection = gift.collectionName || gift.collectionTitle || gift.title;
-  const model = gift.modelName || gift.modelTitle;
+  const model = gift.modelName || gift.modelTitle || '';
   const listingTon = nanoToTon(gift.salePrice);
-  const liq = getModelLiquiditySnapshot(collection, model, ANALYSIS_DAYS);
+  const liq = model
+    ? getModelLiquiditySnapshot(collection, model, ANALYSIS_DAYS)
+    : null;
+
+  const evaluations: ProfitDealScopeEval[] = scoped.map((s) => ({
+    scope: s.scope,
+    model: s.model,
+    backdrop: s.backdrop,
+    action: s.verdict.action,
+    reason: s.verdict.reason,
+    metrics: s.verdict.metrics,
+  }));
+  const buyScopes = scoped
+    .filter((s) => s.verdict.action === 'buy')
+    .map((s) => s.scope);
 
   return {
     detectedAt: new Date().toISOString(),
@@ -116,10 +153,13 @@ function giftToRecord(gift: Gift, verdict: DealVerdict): ProfitDealRecord {
     number: gift.number,
     priceTon: listingTon,
     priceFormatted: formatTon(gift.salePrice, 4),
+    evaluations,
+    buyScopes,
     verdict: {
-      action: verdict.action,
-      reason: verdict.reason,
-      metrics: verdict.metrics,
+      action: bestBuy.verdict.action,
+      reason: bestBuy.verdict.reason,
+      metrics: bestBuy.verdict.metrics,
+      scope: bestBuy.scope,
     },
     liquidity: liq
       ? {
@@ -160,8 +200,10 @@ export interface SalingScanStats {
   repeatVsPreviousScan: number;
   /** Прошли фильтр включённых коллекций */
   analyzed: number;
-  /** Вердикт buy (не все попадут в JSON — дедуп) */
-  buyVerdicts: number;
+  /** Лотов с хотя бы одним buy по любому срезу */
+  buyLots: number;
+  /** Сколько срезов дали buy (может быть > buyLots) */
+  buyScopeHits: number;
   added: number;
   totalInFile: number;
 }
@@ -177,36 +219,35 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
   const store = loadStore();
   let added = 0;
   let analyzed = 0;
-  let buyVerdicts = 0;
+  let buyLots = 0;
+  let buyScopeHits = 0;
+  const feeRate = getParseFeeRate();
 
   for (const gift of res.gifts) {
     const collection = gift.collectionName || gift.title;
     if (!collection || !isCollectionEnabledForParse(collection)) continue;
 
-    const model = gift.modelName;
-    if (!model) continue;
-
     analyzed++;
     const listingTon = nanoToTon(gift.salePrice);
-    const floorNano =
-      gift.floorPriceNanoTONsByBackdropModel ??
-      gift.floorPriceNanoTONsByCollection;
-    const floorTon = floorNano != null ? nanoToTon(floorNano) : 0;
-
-    const verdict = decide(
+    const scoped = evaluateLotAllScopes(
       collection,
-      model,
+      gift.modelName,
       gift.backdropName,
       listingTon,
-      floorTon,
       ANALYSIS_DAYS,
-      getParseFeeRate(),
+      feeRate,
     );
 
-    if (verdict.action !== 'buy') continue;
+    const buys = scoped.filter((s) => s.verdict.action === 'buy');
+    if (buys.length === 0) continue;
 
-    buyVerdicts++;
-    const record = giftToRecord(gift, verdict);
+    buyLots++;
+    buyScopeHits += buys.length;
+
+    const bestBuy = buys.reduce((a, b) =>
+      a.verdict.metrics.netMargin >= b.verdict.metrics.netMargin ? a : b,
+    );
+    const record = giftToRecord(gift, scoped, bestBuy);
     if (upsertDeal(store, record)) added++;
   }
 
@@ -217,7 +258,8 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
     newVsPreviousScan: newVsPrevious,
     repeatVsPreviousScan: repeatVsPrevious,
     analyzed,
-    buyVerdicts,
+    buyLots,
+    buyScopeHits,
     added,
     totalInFile: store.deals.length,
   };
@@ -278,7 +320,7 @@ export async function runSalingScannerLoop(): Promise<void> {
       console.log(
         `[saling] лента ${s.scanned} → новых vs прошлый опрос: ${s.newVsPreviousScan}` +
           `, повтор: ${s.repeatVsPreviousScan}` +
-          ` | анализ ${s.analyzed}, buy ${s.buyVerdicts}` +
+          ` | анализ ${s.analyzed}, buy лотов ${s.buyLots} (срезов ${s.buyScopeHits})` +
           (s.added > 0 ? `, +${s.added} в JSON` : '') +
           ` | в файле: ${s.totalInFile}`,
       );

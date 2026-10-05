@@ -1,3 +1,4 @@
+import { getSalesVerdictThresholds } from '../parse-config.js';
 import { NANO } from '../types.js';
 import { db } from './index.js';
 import { nowTs } from './storage.js';
@@ -659,7 +660,9 @@ export function decideFromSales(
 
   const pct = Math.round(Math.abs(discount) * 100);
   const marginPct = Math.round(margin * 100);
-  if (discount >= 0.15 && margin >= 0.1) {
+  const { buyMinDiscount, buyMinMargin, watchMinDiscount } =
+    getSalesVerdictThresholds();
+  if (discount >= buyMinDiscount && margin >= buyMinMargin) {
     return {
       action: 'buy',
       scope: stats.scope,
@@ -667,7 +670,7 @@ export function decideFromSales(
       metrics,
     };
   }
-  if (discount >= 0.08 && margin > 0) {
+  if (discount >= watchMinDiscount && margin > 0) {
     return {
       action: 'watch',
       scope: stats.scope,
@@ -697,6 +700,58 @@ export function decideFromSales(
     reason: `цена около медианы продаж (${slice})`,
     metrics,
   };
+}
+
+export interface ScopedLotEvaluation {
+  scope: StatsWithConfidence['scope'];
+  model: string | null;
+  backdrop: string | null;
+  verdict: DealVerdict & { scope: StatsWithConfidence['scope'] };
+}
+
+/**
+ * Четыре явных среза по одному лоту (без отката getStatsSmart):
+ * коллекция; кол+модель; кол+фон (если есть фон); кол+модель+фон.
+ */
+export function evaluateLotAllScopes(
+  collection: string,
+  model: string | null | undefined,
+  backdrop: string | null | undefined,
+  listingPrice: number,
+  days = 7,
+  feeRate = 0.05,
+): ScopedLotEvaluation[] {
+  const modelTrimmed = model?.trim() ?? '';
+  const backdropTrimmed = backdrop?.trim() ?? '';
+  const slices: { model: string | null; backdrop: string | null }[] = [
+    { model: null, backdrop: null },
+  ];
+  if (modelTrimmed) {
+    slices.push({ model: modelTrimmed, backdrop: null });
+  }
+  if (backdropTrimmed) {
+    slices.push({ model: null, backdrop: backdropTrimmed });
+    if (modelTrimmed) {
+      slices.push({ model: modelTrimmed, backdrop: backdropTrimmed });
+    }
+  }
+
+  return slices.map((s) => {
+    const verdict = decideFromSales(
+      collection,
+      s.model,
+      s.backdrop,
+      listingPrice,
+      days,
+      feeRate,
+    );
+    return {
+      scope: verdict.scope,
+      model: s.model,
+      backdrop: s.backdrop,
+      verdict,
+    };
+  });
 }
 
 export function getPriceHistory(

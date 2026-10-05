@@ -28,9 +28,25 @@ export interface ParseConfig {
   salingScannerEnabled: boolean;
   /** Доля комиссии MRKT при перепродаже (0–1). null → DEFAULT_FEE_RATE */
   feeRate: number | null;
+  /** Пороги decideFromSales (доли 0–1). null → DEFAULT_SALES_VERDICT_THRESHOLDS */
+  buyMinDiscount: number | null;
+  buyMinMargin: number | null;
+  watchMinDiscount: number | null;
 }
 
 export const DEFAULT_FEE_RATE = 0.02;
+
+export interface SalesVerdictThresholds {
+  buyMinDiscount: number;
+  buyMinMargin: number;
+  watchMinDiscount: number;
+}
+
+export const DEFAULT_SALES_VERDICT_THRESHOLDS: SalesVerdictThresholds = {
+  buyMinDiscount: 0.08,
+  buyMinMargin: 0.04,
+  watchMinDiscount: 0.04,
+};
 
 /** При включённом saling-сканере пауза между запросами каталога/history */
 export const SALING_SCANNER_MODEL_DELAY_MS = 5000;
@@ -57,6 +73,9 @@ function emptyConfig(): ParseConfig {
     parserHistoryRoundMs: null,
     salingScannerEnabled: false,
     feeRate: null,
+    buyMinDiscount: null,
+    buyMinMargin: null,
+    watchMinDiscount: null,
   };
 }
 
@@ -70,6 +89,24 @@ function parseFeeRateConfig(value: unknown): number | null {
 export function getParseFeeRate(): number {
   const cfg = loadParseConfig();
   return cfg.feeRate ?? DEFAULT_FEE_RATE;
+}
+
+function parseThresholdFraction(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0 || n >= 1) return null;
+  return n;
+}
+
+/** Пороги buy/watch для saling и «Оценки» — читаются на каждый лот. */
+export function getSalesVerdictThresholds(): SalesVerdictThresholds {
+  const cfg = loadParseConfig();
+  const d = DEFAULT_SALES_VERDICT_THRESHOLDS;
+  return {
+    buyMinDiscount: cfg.buyMinDiscount ?? d.buyMinDiscount,
+    buyMinMargin: cfg.buyMinMargin ?? d.buyMinMargin,
+    watchMinDiscount: cfg.watchMinDiscount ?? d.watchMinDiscount,
+  };
 }
 
 function parseOptionalPositiveInt(
@@ -138,6 +175,9 @@ function normalizeConfig(raw: Partial<ParseConfig>): ParseConfig {
     ),
     salingScannerEnabled: raw.salingScannerEnabled === true,
     feeRate: parseFeeRateConfig(raw.feeRate),
+    buyMinDiscount: parseThresholdFraction(raw.buyMinDiscount),
+    buyMinMargin: parseThresholdFraction(raw.buyMinMargin),
+    watchMinDiscount: parseThresholdFraction(raw.watchMinDiscount),
   };
 }
 
@@ -172,6 +212,9 @@ export interface SaveParseConfigInput {
   parserHistoryRoundMs?: number | null;
   salingScannerEnabled?: boolean;
   feeRate?: number | null;
+  buyMinDiscount?: number | null;
+  buyMinMargin?: number | null;
+  watchMinDiscount?: number | null;
 }
 
 export function saveParseConfig(input: SaveParseConfigInput): void {
@@ -211,6 +254,24 @@ export function saveParseConfig(input: SaveParseConfigInput): void {
       input.feeRate === null
         ? null
         : parseFeeRateConfig(input.feeRate);
+  }
+  if (input.buyMinDiscount !== undefined) {
+    next.buyMinDiscount =
+      input.buyMinDiscount === null
+        ? null
+        : parseThresholdFraction(input.buyMinDiscount);
+  }
+  if (input.buyMinMargin !== undefined) {
+    next.buyMinMargin =
+      input.buyMinMargin === null
+        ? null
+        : parseThresholdFraction(input.buyMinMargin);
+  }
+  if (input.watchMinDiscount !== undefined) {
+    next.watchMinDiscount =
+      input.watchMinDiscount === null
+        ? null
+        : parseThresholdFraction(input.watchMinDiscount);
   }
   writeParseConfig(next);
 }

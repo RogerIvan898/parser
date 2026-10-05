@@ -103,6 +103,12 @@ export interface ParserTimingResponse {
   historyRoundMs: number;
 }
 
+export interface SalesVerdictThresholdsResponse {
+  buyMinDiscount: number;
+  buyMinMargin: number;
+  watchMinDiscount: number;
+}
+
 export interface ParseConfigResponse {
   collections: string[];
   /** null = парсить все (ещё не сохраняли выбор) */
@@ -121,6 +127,8 @@ export interface ParseConfigResponse {
   };
   feeRate: number;
   defaultFeeRate?: number;
+  salesVerdictThresholds: SalesVerdictThresholdsResponse;
+  defaultSalesVerdictThresholds?: SalesVerdictThresholdsResponse;
 }
 
 export async function getLiquidity(days: number) {
@@ -146,6 +154,14 @@ export async function getParseConfig(): Promise<ParseConfigResponse> {
     salingScannerTiming: data.salingScannerTiming,
     feeRate: Number(data.feeRate) || 0.02,
     defaultFeeRate: Number(data.defaultFeeRate) || 0.02,
+    salesVerdictThresholds: {
+      buyMinDiscount:
+        Number(data.salesVerdictThresholds?.buyMinDiscount) || 0.08,
+      buyMinMargin: Number(data.salesVerdictThresholds?.buyMinMargin) || 0.04,
+      watchMinDiscount:
+        Number(data.salesVerdictThresholds?.watchMinDiscount) || 0.04,
+    },
+    defaultSalesVerdictThresholds: data.defaultSalesVerdictThresholds,
   };
 }
 
@@ -157,6 +173,9 @@ export async function saveParseConfig(payload: {
   parserHistoryRoundMs?: number;
   salingScannerEnabled?: boolean;
   feeRate?: number;
+  buyMinDiscount?: number;
+  buyMinMargin?: number;
+  watchMinDiscount?: number;
 }) {
   const { data } = await api.put('/parse-config', payload);
   return data;

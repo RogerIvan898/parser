@@ -36,7 +36,7 @@ Bothost при старте монтирует Git на `/app` и скрывае
 
 Включение: **Настройки → Сканер лотов (saling)** → `data/parse-config.json`.
 
-Периодически `POST https://api.tgmrkt.io/api/v1/gifts/saling` с телом без фильтров (`collectionNames: []`, …), `ordering: "None"`, `lowToHigh: false`, `count: 20` — как в клиенте MRKT. Это **лента недавно выставленных лотов**, не сортировка по цене. Выгодные по `decide()` попадают в `data/profit-deals.json`; API: `GET /api/profit-deals`.
+Периодически `POST https://api.tgmrkt.io/api/v1/gifts/saling` с телом без фильтров (`collectionNames: []`, …), `ordering: "None"`, `lowToHigh: false`, `count: 20` — как в клиенте MRKT. Это **лента недавно выставленных лотов**, не сортировка по цене. По каждому лоту — 4 среза (`decideFromSales`): коллекция; кол+модель; кол+фон; кол+модель+фон. В JSON при любом `buy`; API: `GET /api/profit-deals`.
 
 ## Данные
 
