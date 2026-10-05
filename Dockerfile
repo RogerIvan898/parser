@@ -13,9 +13,12 @@ COPY web/package.json web/package-lock.json ./web/
 RUN npm ci --prefix web
 
 COPY . .
-RUN npm run build --prefix web && npm run build
+RUN npm run build:all \
+  && test -f dist/server.js \
+  && test -f dist/db/schema.sql \
+  && test -f web/dist/index.html
 
 ENV NODE_ENV=production
 EXPOSE 3000
 
-CMD ["node", "dist/server.js"]
+CMD ["node", "server.js"]

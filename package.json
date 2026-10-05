@@ -4,8 +4,9 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
-    "start": "node dist/server.js",
+    "build": "tsc && node scripts/postbuild.mjs",
+    "build:all": "npm run build --prefix web && npm run build",
+    "start": "node server.js",
     "parse:lots": "tsx src/parse-lots.ts",
     "parse": "tsx src/parser.ts",
     "server": "tsx src/server.ts",
