@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { pathToFileURL } from 'node:url';
 import {
   initClient,
   fetchCollectionsWithRetry,
@@ -470,6 +471,36 @@ async function syncFeed(feed: HistoryFeedConfig): Promise<void> {
   }
 }
 
+/**
+ * Деплой: один проход коллекций (каталог + модели + market.json),
+ * затем бесконечные круги POST /feed по каждой модели.
+ * Не завершается, пока жив процесс.
+ */
+export async function runCatalogThenHistory(): Promise<void> {
+  await initClient();
+  const historyFeed = parseHistoryFeedConfig();
+  console.log(
+    `[parser] шаг 1/2: коллекции и модели каталога (delay=${DELAY_MS}ms)`,
+  );
+  await syncCatalogAndMarket(true);
+  console.log(
+    `[parser] шаг 2/2: бесконечный парсер моделей, ` +
+      `до ${historyFeed.maxItemsPerModel} продаж/модель/круг, ` +
+      `старт с ${historyFeed.startFrom}`,
+  );
+  await syncFeed(historyFeed);
+}
+
+function launchedAsCli(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return import.meta.url === pathToFileURL(entry).href;
+  } catch {
+    return false;
+  }
+}
+
 async function main(): Promise<void> {
   const catalogMode =
     process.argv.includes('--catalog') ||
@@ -519,9 +550,11 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  recordParseError('collections', 'fatal', err);
-  flushParseErrors();
-  console.error('[parser] fatal:', err);
-  process.exit(1);
-});
+if (launchedAsCli()) {
+  main().catch((err) => {
+    recordParseError('collections', 'fatal', err);
+    flushParseErrors();
+    console.error('[parser] fatal:', err);
+    process.exit(1);
+  });
+}

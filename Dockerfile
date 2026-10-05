@@ -4,7 +4,8 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+# Bothost bind-mounts Git over /app and hides image build output. Keep code outside /app.
+WORKDIR /usr/src/app
 
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -19,6 +20,9 @@ RUN npm run build:all \
   && test -f web/dist/index.html
 
 ENV NODE_ENV=production
+ENV DATA_DIR=/app/data
+RUN mkdir -p /app/data && chmod 777 /app/data
+
 EXPOSE 3000
 
-CMD ["node", "server.js"]
+CMD ["node", "/usr/src/app/dist/server.js"]

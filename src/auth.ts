@@ -3,7 +3,6 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { AuthRequest, AuthResponse } from './types.js';
 import { getMrktAuthFromConfig } from './config.js';
-import { fetchInitData, closeTg } from './tg.js';
 
 const BASE_URL = 'https://api.tgmrkt.io';
 const AUTH_FILE = resolve(process.cwd(), 'auth.json');
@@ -174,6 +173,7 @@ export async function ensureToken(): Promise<string> {
   }
 
   console.log('[auth] логинимся через Telegram-клиент...');
+  const { fetchInitData, closeTg } = await import('./tg.js');
   const tgInitData = await fetchInitData();
   const res = await authenticate(tgInitData);
   saveToken(res.token);

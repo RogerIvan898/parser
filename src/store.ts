@@ -2,7 +2,11 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Collection, FeedItem, GiftBackdrop, Model } from './types.js';
 
-export const DATA_DIR = resolve(process.cwd(), 'data');
+/** Bothost задаёт DATA_DIR=/app/data — это единственный каталог, который живёт между деплоями. */
+const dataDirFromEnv = process.env.DATA_DIR?.trim();
+export const DATA_DIR = dataDirFromEnv
+  ? resolve(dataDirFromEnv)
+  : resolve(process.cwd(), 'data');
 export const CATALOG_FILE = resolve(DATA_DIR, 'catalog.json');
 export const MARKET_FILE = resolve(DATA_DIR, 'market.json');
 

@@ -507,7 +507,6 @@ function bootstrapMrktDb(): void {
 
 async function main(): Promise<void> {
   console.log(`[server] старт PORT=${PORT} cwd=${process.cwd()}`);
-  bootstrapMrktDb();
 
   if (existsSync(WEB_DIST)) {
     await app.register(fastifyStatic, { root: WEB_DIST });
@@ -525,16 +524,57 @@ async function main(): Promise<void> {
   await app.listen({ port: PORT, host: '0.0.0.0' });
   console.log(`[server] готов: http://0.0.0.0:${PORT}`);
 
+  try {
+    bootstrapMrktDb();
+  } catch (err) {
+    console.error('[server] не удалось инициализировать БД:', err);
+  }
+
   void initClient().then(
-    () => console.log('[server] MRKT: токен OK'),
+    () => {
+      console.log('[server] MRKT: токен OK');
+      void runHostedParserLoop();
+    },
     (err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(
-        '[server] MRKT: нет токена (добавь MRKT_AUTH в env) — история/статистика из БД работают, лайв /deals нет:',
+        '[server] MRKT: нет токена (добавь MRKT_AUTH в env) — парсер коллекций и моделей не запущен, лайв /deals нет:',
         msg.split('\n')[0],
       );
     },
   );
+}
+
+function parserAutostartDisabled(): boolean {
+  const flag = process.env.PARSER_AUTOSTART?.trim().toLowerCase();
+  return flag === '0' || flag === 'false' || flag === 'off';
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** После listen: каталог коллекций, затем бесконечные круги моделей. Не роняет HTTP. */
+async function runHostedParserLoop(): Promise<void> {
+  if (parserAutostartDisabled()) {
+    console.log('[server] автопарсер выключен (PARSER_AUTOSTART=0)');
+    return;
+  }
+
+  const { runCatalogThenHistory } = await import('./parser.js');
+  const retryMs = 60_000;
+
+  for (;;) {
+    try {
+      await runCatalogThenHistory();
+      console.warn(
+        '[server] парсер моделей остановился (пустой каталог), повтор через 60с',
+      );
+    } catch (err) {
+      console.error('[server] парсер остановился, повтор через 60с:', err);
+    }
+    await sleep(retryMs);
+  }
 }
 
 try {

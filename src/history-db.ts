@@ -1,11 +1,11 @@
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import type { FeedItem } from './types.js';
 import { NANO } from './types.js';
-import { toStoredFeedSale, type StoredFeedSale } from './store.js';
+import { DATA_DIR, toStoredFeedSale, type StoredFeedSale } from './store.js';
 
-export const HISTORY_DB_FILE = resolve(process.cwd(), 'data', 'history.db');
+export const HISTORY_DB_FILE = resolve(DATA_DIR, 'history.db');
 
 const DB_VERSION = 3;
 /** Знаков после запятой для цен в TON */
@@ -132,7 +132,7 @@ function saleToRow(s: StoredFeedSale) {
 
 export function openHistoryDb(): Database.Database {
   if (db) return db;
-  mkdirSync(resolve(process.cwd(), 'data'), { recursive: true });
+  mkdirSync(dirname(HISTORY_DB_FILE), { recursive: true });
   db = new Database(HISTORY_DB_FILE);
   db.pragma('journal_mode = WAL');
   initSchema(db);

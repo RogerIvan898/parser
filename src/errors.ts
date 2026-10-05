@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { DATA_DIR } from './store.js';
 
 export type ParseErrorPhase =
   | 'collections'
@@ -16,7 +17,7 @@ export interface ParseErrorRecord {
   message: string;
 }
 
-const ERRORS_FILE = resolve(process.cwd(), 'data', 'errors.json');
+const ERRORS_FILE = resolve(DATA_DIR, 'errors.json');
 
 const records: ParseErrorRecord[] = [];
 
@@ -47,7 +48,7 @@ export function getParseErrors(): readonly ParseErrorRecord[] {
 export function flushParseErrors(): void {
   if (records.length === 0) return;
 
-  mkdirSync(resolve(process.cwd(), 'data'), { recursive: true });
+  mkdirSync(DATA_DIR, { recursive: true });
   writeFileSync(
     ERRORS_FILE,
     JSON.stringify(
