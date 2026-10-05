@@ -17,11 +17,6 @@ function log(line) {
     /* stdout может быть закрыт */
   }
   try {
-    writeSync(2, text);
-  } catch {
-    /* stderr */
-  }
-  try {
     mkdirSync('/app/data', { recursive: true });
     appendFileSync(logFile, text);
   } catch (err) {
