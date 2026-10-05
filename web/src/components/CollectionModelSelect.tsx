@@ -70,6 +70,11 @@ export default function CollectionModelSelect({
     }
   }
 
+  const emptyHint =
+    catalog.data?.needsMrktAuth
+      ? 'На сервере нет catalog.json. Укажи MRKT_AUTH в Bothost и перезапусти — коллекции подтянутся при открытии страницы.'
+      : null;
+
   return (
     <>
       <ImageSelect
@@ -80,7 +85,7 @@ export default function CollectionModelSelect({
         disabled={disabled || collectionOptions.length === 0}
         placeholder={
           collectionOptions.length === 0
-            ? 'Нет каталога — npm run parse -- --catalog'
+            ? 'Нет каталога — задай MRKT_AUTH на сервере или npm run parse -- --catalog'
             : '—'
         }
       />
@@ -96,6 +101,11 @@ export default function CollectionModelSelect({
         }
         placeholder="—"
       />
+      {emptyHint ? (
+        <p className="form-hint" style={{ marginTop: 8, gridColumn: '1 / -1' }}>
+          {emptyHint}
+        </p>
+      ) : null}
     </>
   );
 }

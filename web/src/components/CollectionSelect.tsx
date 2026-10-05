@@ -39,6 +39,10 @@ export default function CollectionSelect({
   if (catalog.isLoading) return <Loading />;
   if (catalog.isError) return <ErrorBox error={catalog.error} />;
 
+  const emptyHint = catalog.data?.needsMrktAuth
+    ? 'На сервере нет catalog.json. Добавь переменную MRKT_AUTH в Bothost и перезапусти бота — список коллекций подтянется сам.'
+    : null;
+
   return (
     <ImageSelect
       label={label}
@@ -48,5 +52,8 @@ export default function CollectionSelect({
       disabled={disabled || options.length === 0}
       placeholder={options.length === 0 ? 'Нет каталога' : '—'}
     />
+    {emptyHint ? (
+      <p className="form-hint" style={{ marginTop: 8 }}>{emptyHint}</p>
+    ) : null}
   );
 }

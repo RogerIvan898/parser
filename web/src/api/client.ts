@@ -44,16 +44,20 @@ export interface CatalogResponse {
   collectionThumbnails: Record<string, string>;
   modelThumbnails: Record<string, Record<string, string>>;
   backdrops: Record<string, CatalogBackdrop[]>;
+  /** true, если каталог пуст и bootstrap с MRKT не сработал */
+  needsMrktAuth?: boolean;
 }
 
 export async function getCatalog(): Promise<CatalogResponse> {
   const { data } = await api.get('/catalog');
+  
   return {
     collections: data.collections ?? [],
     models: data.models ?? {},
     collectionThumbnails: data.collectionThumbnails ?? {},
     modelThumbnails: data.modelThumbnails ?? {},
     backdrops: data.backdrops ?? {},
+    needsMrktAuth: data.needsMrktAuth === true,
   };
 }
 

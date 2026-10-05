@@ -44,6 +44,7 @@ import {
   HISTORY_FEED_BACKDROP_NAMES,
 } from './parse-config.js';
 import { listLiquidItems } from './db/liquidity.js';
+import { ensureCatalogCollectionsFromApi } from './catalog-bootstrap.js';
 
 const PORT = Number(process.env.PORT) || 3000;
 /** Рядом с dist/, не от cwd: Bothost часто стартует процесс из /app. */
@@ -96,6 +97,10 @@ function catalogNeedsModelHydrate(catalog: ReturnType<typeof loadCatalog>): bool
 
 app.get('/catalog', async (_req, reply) => {
   try {
+    if (listCatalogCollections(loadCatalog()).length === 0) {
+      await ensureCatalogCollectionsFromApi();
+    }
+
     const catalog = loadCatalog();
     if (catalogNeedsModelHydrate(catalog)) {
       const market = loadMarket();
@@ -136,6 +141,7 @@ app.get('/catalog', async (_req, reply) => {
       collectionThumbnails,
       modelThumbnails,
       backdrops,
+      needsMrktAuth: collections.length === 0,
     });
   } catch (err) {
     return reply.code(500).send({ error: (err as Error).message });
