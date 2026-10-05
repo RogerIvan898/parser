@@ -28,6 +28,14 @@ function log(line) {
   }
 }
 
+const nodeMajor = Number(process.versions.node.split('.')[0]);
+if (!Number.isFinite(nodeMajor) || nodeMajor < 22) {
+  log(
+    `[boot] Node ${process.version} не подходит: для базы нужен Node 22 или новее. Образ пересобери с нуля.`,
+  );
+  process.exit(1);
+}
+
 log(`[boot] ${new Date().toISOString()} node ${process.version} pid ${process.pid}`);
 log(`[boot] cwd=${process.cwd()} PORT=${process.env.PORT ?? ''} DATA_DIR=${process.env.DATA_DIR ?? ''}`);
 
