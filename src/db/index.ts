@@ -116,5 +116,82 @@ dbLog(
 export const db = new Database(DB_FILE, { timeout: 5000 });
 db.pragma('journal_mode = DELETE');
 db.pragma('foreign_keys = ON');
+
+function tableExists(name: string): boolean {
+  const row = db
+    .prepare(
+      "SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = ?",
+    )
+    .get(name) as { x: number } | undefined;
+  return row != null;
+}
+
+function salesColumns(): string[] {
+  if (!tableExists('sales')) return [];
+  return (
+    db.prepare('PRAGMA table_info(sales)').all() as { name: string }[]
+  ).map((c) => c.name);
+}
+
+const SALES_INDEXES = `
+CREATE INDEX IF NOT EXISTS idx_sales_coll_model_ts
+  ON sales(collection_name, model_name, ts);
+CREATE INDEX IF NOT EXISTS idx_sales_coll_model_backdrop_ts
+  ON sales(collection_name, model_name, backdrop_name, ts);
+CREATE INDEX IF NOT EXISTS idx_sales_collection_ts
+  ON sales(collection_name, ts);
+`;
+
+/**
+ * Старые sales хранили весь подарок в raw_json. Аналитика читает только
+ * коллекцию, модель, фон, цену и время — переписываем таблицу и отдаём место диску.
+ */
+function slimSalesTable(): void {
+  const cols = salesColumns();
+  if (!cols.includes('raw_json')) return;
+
+  dbLog('сжимаю sales: оставляю коллекцию, модель, фон, цену и время');
+  db.pragma('foreign_keys = OFF');
+  const slim = db.transaction(() => {
+    db.exec('DROP TABLE IF EXISTS sales_slim');
+    db.exec(`
+      CREATE TABLE sales_slim (
+        id TEXT PRIMARY KEY,
+        collection_name TEXT NOT NULL,
+        model_name TEXT NOT NULL,
+        backdrop_name TEXT NOT NULL DEFAULT '',
+        amount_nano INTEGER NOT NULL,
+        ts INTEGER NOT NULL
+      )
+    `);
+    db.exec(`
+      INSERT INTO sales_slim (
+        id, collection_name, model_name, backdrop_name, amount_nano, ts
+      )
+      SELECT id, collection_name, model_name, backdrop_name, amount_nano, ts
+      FROM sales
+    `);
+    db.exec('DROP TABLE sales');
+    db.exec('ALTER TABLE sales_slim RENAME TO sales');
+    db.exec(SALES_INDEXES);
+  });
+  slim();
+  db.pragma('foreign_keys = ON');
+}
+
+if (!tableExists('sales') && tableExists('sales_slim')) {
+  db.exec('ALTER TABLE sales_slim RENAME TO sales');
+  db.exec(SALES_INDEXES);
+  dbLog('дособрал sales после оборванного сжатия');
+}
+
 db.exec(readFileSync(resolve(__dirname, 'schema.sql'), 'utf8'));
+slimSalesTable();
+const freePages = db.pragma('freelist_count', { simple: true }) as number;
+if (freePages >= 1000) {
+  db.pragma('cache_size = -8000');
+  dbLog(`vacuum mrkt.db: свободно ${freePages} страниц`);
+  db.exec('VACUUM');
+  dbLog('sales сжата');
+}
 dbLog('схема применена');

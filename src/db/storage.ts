@@ -89,28 +89,25 @@ export function saveModelPrices(
 export function saveSales(items: FeedItem[]): number {
   const stmt = db.prepare(`
     INSERT OR IGNORE INTO sales (
-      id, collection_name, model_name, backdrop_name, symbol_name,
-      gift_number, amount_nano, date, ts, raw_json
+      id, collection_name, model_name, backdrop_name, amount_nano, ts
     ) VALUES (
-      @id, @collection_name, @model_name, @backdrop_name, @symbol_name,
-      @gift_number, @amount_nano, @date, @ts, @raw_json
+      @id, @collection_name, @model_name, @backdrop_name, @amount_nano, @ts
     )
   `);
   let added = 0;
   const tx = db.transaction((rows: FeedItem[]) => {
     for (const item of rows) {
       const g = item.gift;
+      const collectionName = g.collectionName || g.title;
+      const modelName = g.modelName;
+      if (!collectionName || !modelName) continue;
       const info = stmt.run({
         id: item.id,
-        collection_name: g.collectionName,
-        model_name: g.modelName,
-        backdrop_name: g.backdropName,
-        symbol_name: g.symbolName,
-        gift_number: g.number,
+        collection_name: collectionName,
+        model_name: modelName,
+        backdrop_name: g.backdropName ?? '',
         amount_nano: item.amount,
-        date: item.date,
         ts: isoToTs(item.date),
-        raw_json: JSON.stringify(item),
       });
       if (info.changes > 0) added++;
     }

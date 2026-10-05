@@ -380,23 +380,13 @@ app.get('/item/:id', async (req, reply) => {
     if (!row) {
       return reply.code(404).send({ error: 'продажа не найдена' });
     }
-    let gift: Gift | null = null;
-    try {
-      const parsed = JSON.parse(row.raw_json) as { gift?: Gift };
-      gift = parsed.gift ?? null;
-    } catch {
-      gift = null;
-    }
     return reply.send({
       id: row.id,
       collection_name: row.collection_name,
       model_name: row.model_name,
-      gift_number: row.gift_number,
       backdrop_name: row.backdrop_name,
-      symbol_name: row.symbol_name,
       amount_nano: row.amount_nano,
-      date: row.date,
-      gift,
+      ts: row.ts,
     });
   } catch (err) {
     req.log.error(err);

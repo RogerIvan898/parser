@@ -53,6 +53,12 @@ import {
   getHistoryFeedBackdropNames,
   countEnabledForParse,
 } from './parse-config.js';
+import {
+  findResumeIndex,
+  loadHistoryProgress,
+  saveHistoryProgress,
+  HISTORY_PROGRESS_FILE,
+} from './history-progress.js';
 
 const DELAY_MS = Number(process.env.PARSER_DELAY_MS) || 400;
 const FEED_TIMEOUT_MS = Number(process.env.PARSER_FEED_TIMEOUT_MS) || 60_000;
@@ -73,6 +79,8 @@ export interface HistoryFeedConfig {
   maxItemsPerModel: number;
   /** 1-based номер модели в очереди (как в логе 871/1000) */
   startFrom: number;
+  /** true, если позицию задали флагом --from / --start, а не файлом прогресса */
+  explicitStart: boolean;
 }
 
 export function parseHistoryFeedConfig(): HistoryFeedConfig {
@@ -94,12 +102,13 @@ export function parseHistoryFeedConfig(): HistoryFeedConfig {
 
   const fromRaw = argValue('--from') ?? argValue('--start');
   let startFrom = 1;
-  if (fromRaw !== undefined) {
+  const explicitStart = fromRaw !== undefined;
+  if (explicitStart) {
     const n = Number(fromRaw);
     if (Number.isFinite(n) && n >= 1) startFrom = Math.floor(n);
   }
 
-  return { maxItemsPerModel, startFrom };
+  return { maxItemsPerModel, startFrom, explicitStart };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -388,11 +397,25 @@ async function syncCatalogAndMarket(writeMarket: boolean): Promise<void> {
   );
 }
 
-async function syncFeed(feed: HistoryFeedConfig): Promise<void> {
+function historyTasks(): { collectionName: string; modelName: string }[] {
   const catalog = loadCatalog();
-  const tasks = listCatalogModelTasks(catalog).filter((t) =>
+  return listCatalogModelTasks(catalog).filter((t) =>
     isCollectionEnabledForParse(t.collectionName),
   );
+}
+
+/** Середина круга: рестарт не должен заново обходить каталог и модели с начала. */
+function resumeSkipsCatalog(feed: HistoryFeedConfig): boolean {
+  if (feed.explicitStart) return false;
+  const progress = loadHistoryProgress();
+  if (!progress) return false;
+  const tasks = historyTasks();
+  if (tasks.length === 0) return false;
+  return findResumeIndex(tasks, progress) > 0;
+}
+
+async function syncFeed(feed: HistoryFeedConfig): Promise<void> {
+  const tasks = historyTasks();
   if (tasks.length === 0) {
     console.warn(
       '[history] нет пар коллекция+модель (или все коллекции выключены в parse-config) — ' +
@@ -401,11 +424,33 @@ async function syncFeed(feed: HistoryFeedConfig): Promise<void> {
     return;
   }
 
-  if (feed.startFrom > tasks.length) {
+  if (feed.explicitStart && feed.startFrom > tasks.length) {
     console.warn(
       `[history] --from ${feed.startFrom} больше числа моделей (${tasks.length})`,
     );
     return;
+  }
+
+  const progress = feed.explicitStart ? null : loadHistoryProgress();
+  let round = progress?.round ?? 1;
+  let index = feed.explicitStart ? feed.startFrom - 1 : 0;
+  if (progress) {
+    const found = findResumeIndex(tasks, progress);
+    const samePair =
+      tasks[found]?.collectionName === progress.collectionName &&
+      tasks[found]?.modelName === progress.modelName;
+    index = found;
+    if (!samePair && found === 0) {
+      console.warn(
+        `[history] в каталоге нет ${progress.collectionName} / ${progress.modelName} ` +
+          'и ничего после неё — круг с начала',
+      );
+    } else if (!samePair) {
+      console.warn(
+        `[history] в каталоге нет ${progress.collectionName} / ${progress.modelName}, ` +
+          `продолжаю с ${tasks[found]!.collectionName} / ${tasks[found]!.modelName}`,
+      );
+    }
   }
 
   const database = openHistoryDb();
@@ -417,10 +462,14 @@ async function syncFeed(feed: HistoryFeedConfig): Promise<void> {
     `[history] моделей в каталоге: ${tasks.length}, до ${feed.maxItemsPerModel} продаж/модель/круг, ` +
       `по ${FEED_API_PAGE_SIZE} за запрос (лимит API /feed)`,
   );
-  if (feed.startFrom > 1) {
+  if (index > 0) {
+    const at = tasks[index]!;
     console.log(
-      `[history] старт с позиции ${feed.startFrom}/${tasks.length} ` +
-        `(пропуск ${feed.startFrom - 1}, флаги --from / --start)`,
+      `[history] продолжаю круг ${round} с ${index + 1}/${tasks.length} ` +
+        `${at.collectionName} / ${at.modelName}` +
+        (feed.explicitStart
+          ? ' (флаги --from / --start)'
+          : ` (${HISTORY_PROGRESS_FILE})`),
     );
   }
   console.log(`[history] в БД сейчас: ${countSales(database)} продаж`);
@@ -433,20 +482,16 @@ async function syncFeed(feed: HistoryFeedConfig): Promise<void> {
       ' (Ctrl+C)',
   );
 
-  let round = 0;
   let grandTotal = 0;
 
   try {
     for (;;) {
-      round++;
       let roundAdded = 0;
       console.log(`\n[history] === круг ${round} ===`);
 
-      for (let i = 0; i < tasks.length; i++) {
+      for (let i = index; i < tasks.length; i++) {
         const stepNum = i + 1;
-        if (stepNum < feed.startFrom) continue;
-
-        const { collectionName, modelName } = tasks[i];
+        const { collectionName, modelName } = tasks[i]!;
         const step = `${stepNum}/${tasks.length}`;
         roundAdded += await syncModelFeed(
           database,
@@ -456,13 +501,24 @@ async function syncFeed(feed: HistoryFeedConfig): Promise<void> {
           step,
           feed,
         );
-        if (stepNum < tasks.length) await sleep(DELAY_MS);
+
+        const hasNext = i + 1 < tasks.length;
+        const next = hasNext ? tasks[i + 1]! : tasks[0]!;
+        saveHistoryProgress({
+          round: hasNext ? round : round + 1,
+          collectionName: next.collectionName,
+          modelName: next.modelName,
+        });
+
+        if (hasNext) await sleep(DELAY_MS);
       }
 
       grandTotal += roundAdded;
       console.log(
         `[history] круг ${round} итог: +${roundAdded} продаж, за сессию: +${grandTotal}, в БД: ${countSales(database)}`,
       );
+      index = 0;
+      round += 1;
       console.log(`[history] пауза ${pauseBetweenRounds} ms...`);
       await sleep(pauseBetweenRounds);
     }
@@ -479,14 +535,19 @@ async function syncFeed(feed: HistoryFeedConfig): Promise<void> {
 export async function runCatalogThenHistory(): Promise<void> {
   await initClient();
   const historyFeed = parseHistoryFeedConfig();
-  console.log(
-    `[parser] шаг 1/2: коллекции и модели каталога (delay=${DELAY_MS}ms)`,
-  );
-  await syncCatalogAndMarket(true);
+  if (resumeSkipsCatalog(historyFeed)) {
+    console.log(
+      '[parser] есть незавершённый круг истории — каталог не обновляю, продолжаю /feed',
+    );
+  } else {
+    console.log(
+      `[parser] шаг 1/2: коллекции и модели каталога (delay=${DELAY_MS}ms)`,
+    );
+    await syncCatalogAndMarket(true);
+  }
   console.log(
     `[parser] шаг 2/2: бесконечный парсер моделей, ` +
-      `до ${historyFeed.maxItemsPerModel} продаж/модель/круг, ` +
-      `старт с ${historyFeed.startFrom}`,
+      `до ${historyFeed.maxItemsPerModel} продаж/модель/круг`,
   );
   await syncFeed(historyFeed);
 }

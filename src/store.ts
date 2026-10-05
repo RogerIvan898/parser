@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { Collection, FeedItem, GiftBackdrop, Model } from './types.js';
+import type { Collection, GiftBackdrop, Model } from './types.js';
 
 /** Bothost задаёт DATA_DIR=/app/data — это единственный каталог, который живёт между деплоями. */
 const dataDirFromEnv = process.env.DATA_DIR?.trim();
@@ -61,100 +61,6 @@ export interface MarketStore {
   updatedAt: string;
   collections: Record<string, CollectionMarketPoint[]>;
   models: Record<string, ModelMarketPoint[]>;
-}
-
-/** Компактная запись продажи (SQLite history.db) */
-export interface StoredFeedGift {
-  id: string;
-  exportDate: string;
-  receivedDate: string;
-  giftId: number;
-  backdropColorsCenterColor: number;
-  backdropColorsEdgeColor: number;
-  backdropColorsTextColor: number;
-  backdropColorsSymbolColor: number;
-  backdropName: string;
-  modelName: string;
-  modelStickerKey: string;
-  modelStickerThumbnailKey: string;
-  symbolName: string;
-  symbolStickerKey: string;
-  symbolStickerThumbnailKey: string;
-  name: string;
-  number: number;
-  collectionName: string;
-  salePrice: number;
-  salesCount: number;
-  isLocked: boolean;
-  isLockedForSale: boolean;
-  unlockDate: string;
-  nextGiveAvailableAt: string;
-  premarketStatus: string;
-  waitGiftUntil: string | null;
-  giftsCollectionId: string | null;
-  giftType: string;
-  collectionTitle: string;
-  modelTitle: string;
-  returnLockedUntil: string | null;
-  returnLockReason: string | null;
-  spaceMonkeysPoints: number | null;
-  floorPriceNanoTONsByCollection: number | null;
-  floorPriceNanoTONsByBackdropModel: number | null;
-  minted: boolean;
-}
-
-export interface StoredFeedSale {
-  id: string;
-  gift: StoredFeedGift;
-  amount: number;
-  date: string;
-}
-
-export function toStoredFeedSale(item: FeedItem): StoredFeedSale {
-  const g = item.gift;
-  return {
-    id: item.id,
-    gift: {
-      id: g.id,
-      exportDate: g.exportDate,
-      receivedDate: g.receivedDate,
-      giftId: g.giftId,
-      backdropColorsCenterColor: g.backdropColorsCenterColor,
-      backdropColorsEdgeColor: g.backdropColorsEdgeColor,
-      backdropColorsTextColor: g.backdropColorsTextColor,
-      backdropColorsSymbolColor: g.backdropColorsSymbolColor,
-      backdropName: g.backdropName,
-      modelName: g.modelName,
-      modelStickerKey: g.modelStickerKey,
-      modelStickerThumbnailKey: g.modelStickerThumbnailKey,
-      symbolName: g.symbolName,
-      symbolStickerKey: g.symbolStickerKey,
-      symbolStickerThumbnailKey: g.symbolStickerThumbnailKey,
-      name: g.name,
-      number: g.number,
-      collectionName: g.collectionName,
-      salePrice: g.salePrice,
-      salesCount: g.salesCount,
-      isLocked: g.isLocked,
-      isLockedForSale: g.isLockedForSale,
-      unlockDate: g.unlockDate,
-      nextGiveAvailableAt: g.nextGiveAvailableAt,
-      premarketStatus: g.premarketStatus,
-      waitGiftUntil: g.waitGiftUntil,
-      giftsCollectionId: g.giftsCollectionId,
-      giftType: g.giftType,
-      collectionTitle: g.collectionTitle,
-      modelTitle: g.modelTitle,
-      returnLockedUntil: g.returnLockedUntil,
-      returnLockReason: g.returnLockReason,
-      spaceMonkeysPoints: g.spaceMonkeysPoints,
-      floorPriceNanoTONsByCollection: g.floorPriceNanoTONsByCollection,
-      floorPriceNanoTONsByBackdropModel: g.floorPriceNanoTONsByBackdropModel,
-      minted: g.minted,
-    },
-    amount: item.amount,
-    date: item.date,
-  };
 }
 
 export function modelKey(collectionName: string, modelName: string): string {

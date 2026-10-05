@@ -3,11 +3,11 @@ import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { FeedItem } from './types.js';
 import { NANO } from './types.js';
-import { DATA_DIR, toStoredFeedSale, type StoredFeedSale } from './store.js';
+import { DATA_DIR } from './store.js';
 
 export const HISTORY_DB_FILE = resolve(DATA_DIR, 'history.db');
 
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 /** Знаков после запятой для цен в TON */
 const TON_DECIMALS = 4;
 
@@ -25,109 +25,147 @@ CREATE TABLE IF NOT EXISTS sales (
   id TEXT PRIMARY KEY NOT NULL,
   amount REAL NOT NULL,
   date TEXT NOT NULL,
-  gift_id TEXT NOT NULL,
-  export_date TEXT NOT NULL,
-  received_date TEXT NOT NULL,
-  gift_id_num INTEGER NOT NULL,
-  backdrop_colors_center_color INTEGER NOT NULL,
-  backdrop_colors_edge_color INTEGER NOT NULL,
-  backdrop_colors_text_color INTEGER NOT NULL,
-  backdrop_colors_symbol_color INTEGER NOT NULL,
   backdrop_name TEXT NOT NULL,
   model_name TEXT NOT NULL,
-  model_sticker_key TEXT NOT NULL,
-  model_sticker_thumbnail_key TEXT NOT NULL,
-  symbol_name TEXT NOT NULL,
-  symbol_sticker_key TEXT NOT NULL,
-  symbol_sticker_thumbnail_key TEXT NOT NULL,
-  name TEXT NOT NULL,
-  number INTEGER NOT NULL,
-  collection_name TEXT NOT NULL,
-  sale_price REAL NOT NULL,
-  sales_count INTEGER NOT NULL,
-  is_locked INTEGER NOT NULL,
-  is_locked_for_sale INTEGER NOT NULL,
-  unlock_date TEXT NOT NULL,
-  next_give_available_at TEXT NOT NULL,
-  premarket_status TEXT NOT NULL,
-  wait_gift_until TEXT,
-  gifts_collection_id TEXT,
-  gift_type TEXT NOT NULL,
-  collection_title TEXT NOT NULL,
-  model_title TEXT NOT NULL,
-  return_locked_until TEXT,
-  return_lock_reason TEXT,
-  space_monkeys_points INTEGER,
-  floor_by_collection REAL,
-  floor_by_backdrop_model REAL,
-  minted INTEGER NOT NULL
+  collection_name TEXT NOT NULL
 );
 `;
 
 const CREATE_INDEXES = `
 CREATE INDEX IF NOT EXISTS idx_sales_collection_model
   ON sales(collection_name, model_name);
-CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(date);
 `;
 
-function initSchema(database: Database.Database): void {
-  const ver = database.pragma('user_version', { simple: true }) as number;
-  if (ver < DB_VERSION) {
-    database.exec('DROP TABLE IF EXISTS sales');
-    database.exec(CREATE_SALES);
-    database.exec(CREATE_INDEXES);
-    database.pragma(`user_version = ${DB_VERSION}`);
-    return;
-  }
-  database.exec(CREATE_SALES);
-  database.exec(CREATE_INDEXES);
+function columnNames(database: Database.Database, table: string): string[] {
+  const exists = database
+    .prepare(
+      "SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = ?",
+    )
+    .get(table) as { x: number } | undefined;
+  if (!exists) return [];
+  return (
+    database.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
+  ).map((c) => c.name);
 }
 
-function saleToRow(s: StoredFeedSale) {
-  const g = s.gift;
-  return {
-    id: s.id,
-    amount: nanoToTonRounded(s.amount)!,
-    date: s.date,
-    gift_id: g.id,
-    export_date: g.exportDate,
-    received_date: g.receivedDate,
-    gift_id_num: g.giftId,
-    backdrop_colors_center_color: g.backdropColorsCenterColor,
-    backdrop_colors_edge_color: g.backdropColorsEdgeColor,
-    backdrop_colors_text_color: g.backdropColorsTextColor,
-    backdrop_colors_symbol_color: g.backdropColorsSymbolColor,
-    backdrop_name: g.backdropName,
-    model_name: g.modelName,
-    model_sticker_key: g.modelStickerKey,
-    model_sticker_thumbnail_key: g.modelStickerThumbnailKey,
-    symbol_name: g.symbolName,
-    symbol_sticker_key: g.symbolStickerKey,
-    symbol_sticker_thumbnail_key: g.symbolStickerThumbnailKey,
-    name: g.name,
-    number: g.number,
-    collection_name: g.collectionName,
-    sale_price: nanoToTonRounded(g.salePrice)!,
-    sales_count: g.salesCount,
-    is_locked: g.isLocked ? 1 : 0,
-    is_locked_for_sale: g.isLockedForSale ? 1 : 0,
-    unlock_date: g.unlockDate,
-    next_give_available_at: g.nextGiveAvailableAt,
-    premarket_status: g.premarketStatus,
-    wait_gift_until: g.waitGiftUntil,
-    gifts_collection_id: g.giftsCollectionId,
-    gift_type: g.giftType,
-    collection_title: g.collectionTitle,
-    model_title: g.modelTitle,
-    return_locked_until: g.returnLockedUntil,
-    return_lock_reason: g.returnLockReason,
-    space_monkeys_points: g.spaceMonkeysPoints,
-    floor_by_collection: nanoToTonRounded(g.floorPriceNanoTONsByCollection),
-    floor_by_backdrop_model: nanoToTonRounded(
-      g.floorPriceNanoTONsByBackdropModel,
-    ),
-    minted: g.minted ? 1 : 0,
-  };
+/** Старая history.db копировала весь подарок. Оставляем поля, которые читает импорт в mrkt.db. */
+function slimHistorySales(database: Database.Database): void {
+  if (
+    columnNames(database, 'sales').length === 0 &&
+    columnNames(database, 'sales_slim').length > 0
+  ) {
+    database.exec('ALTER TABLE sales_slim RENAME TO sales');
+    database.exec(CREATE_INDEXES);
+  }
+
+  const cols = columnNames(database, 'sales');
+  const fat =
+    cols.includes('model_sticker_key') ||
+    cols.includes('gift_id') ||
+    cols.includes('symbol_name') ||
+    cols.includes('sale_price');
+  if (!fat) return;
+
+  const amountSql = cols.includes('sale_price')
+    ? 'CASE WHEN amount > 0 THEN amount ELSE sale_price END'
+    : 'amount';
+  console.log('[history] сжимаю sales: убираю неиспользуемые поля подарка');
+  const slim = database.transaction(() => {
+    database.exec('DROP TABLE IF EXISTS sales_slim');
+    database.exec(`
+      CREATE TABLE sales_slim (
+        id TEXT PRIMARY KEY NOT NULL,
+        amount REAL NOT NULL,
+        date TEXT NOT NULL,
+        backdrop_name TEXT NOT NULL,
+        model_name TEXT NOT NULL,
+        collection_name TEXT NOT NULL
+      )
+    `);
+    database.exec(`
+      INSERT INTO sales_slim (
+        id, amount, date, backdrop_name, model_name, collection_name
+      )
+      SELECT
+        id,
+        ${amountSql},
+        date,
+        backdrop_name,
+        model_name,
+        collection_name
+      FROM sales
+    `);
+    database.exec('DROP TABLE sales');
+    database.exec('ALTER TABLE sales_slim RENAME TO sales');
+    database.exec(CREATE_INDEXES);
+  });
+  slim();
+}
+
+function initSchema(database: Database.Database): void {
+  slimHistorySales(database);
+  database.exec(CREATE_SALES);
+  database.exec(CREATE_INDEXES);
+  database.pragma(`user_version = ${DB_VERSION}`);
+  const freePages = database.pragma('freelist_count', { simple: true }) as number;
+  if (freePages >= 1000) {
+    database.pragma('cache_size = -8000');
+    console.log(`[history] vacuum history.db: свободно ${freePages} страниц`);
+    database.exec('VACUUM');
+    console.log('[history] sales сжата');
+  }
+}
+
+export function insertFeedPage(
+  database: Database.Database,
+  items: FeedItem[],
+): number {
+  const insert = database.prepare(`
+    INSERT OR IGNORE INTO sales (
+      id, amount, date, backdrop_name, model_name, collection_name
+    ) VALUES (
+      @id, @amount, @date, @backdrop_name, @model_name, @collection_name
+    )
+  `);
+
+  const runBatch = database.transaction(
+    (
+      batch: {
+        id: string;
+        amount: number;
+        date: string;
+        backdrop_name: string;
+        model_name: string;
+        collection_name: string;
+      }[],
+    ) => {
+      let added = 0;
+      for (const sale of batch) {
+        const info = insert.run(sale);
+        if (info.changes > 0) added++;
+      }
+      return added;
+    },
+  );
+
+  const batch = [];
+  for (const item of items) {
+    const collectionName = item.gift.collectionName || item.gift.title;
+    const modelName = item.gift.modelName;
+    if (!collectionName || !modelName) continue;
+    const amount = nanoToTonRounded(item.amount);
+    if (amount == null) continue;
+    batch.push({
+      id: item.id,
+      amount,
+      date: item.date,
+      backdrop_name: item.gift.backdropName ?? '',
+      model_name: modelName,
+      collection_name: collectionName,
+    });
+  }
+
+  return runBatch(batch);
 }
 
 export function openHistoryDb(): Database.Database {
@@ -144,61 +182,6 @@ export function closeHistoryDb(): void {
     db.close();
     db = null;
   }
-}
-
-export function insertFeedPage(
-  database: Database.Database,
-  items: FeedItem[],
-): number {
-  const insert = database.prepare(`
-    INSERT OR IGNORE INTO sales (
-      id, amount, date,
-      gift_id, export_date, received_date, gift_id_num,
-      backdrop_colors_center_color, backdrop_colors_edge_color,
-      backdrop_colors_text_color, backdrop_colors_symbol_color,
-      backdrop_name, model_name, model_sticker_key, model_sticker_thumbnail_key,
-      symbol_name, symbol_sticker_key, symbol_sticker_thumbnail_key,
-      name, number, collection_name, sale_price, sales_count,
-      is_locked, is_locked_for_sale, unlock_date, next_give_available_at,
-      premarket_status, wait_gift_until, gifts_collection_id, gift_type,
-      collection_title, model_title, return_locked_until, return_lock_reason,
-      space_monkeys_points, floor_by_collection,
-      floor_by_backdrop_model, minted
-    ) VALUES (
-      @id, @amount, @date,
-      @gift_id, @export_date, @received_date, @gift_id_num,
-      @backdrop_colors_center_color, @backdrop_colors_edge_color,
-      @backdrop_colors_text_color, @backdrop_colors_symbol_color,
-      @backdrop_name, @model_name, @model_sticker_key, @model_sticker_thumbnail_key,
-      @symbol_name, @symbol_sticker_key, @symbol_sticker_thumbnail_key,
-      @name, @number, @collection_name, @sale_price, @sales_count,
-      @is_locked, @is_locked_for_sale, @unlock_date, @next_give_available_at,
-      @premarket_status, @wait_gift_until, @gifts_collection_id, @gift_type,
-      @collection_title, @model_title, @return_locked_until, @return_lock_reason,
-      @space_monkeys_points, @floor_by_collection,
-      @floor_by_backdrop_model, @minted
-    )
-  `);
-
-  const runBatch = database.transaction((batch: StoredFeedSale[]) => {
-    let added = 0;
-    for (const sale of batch) {
-      const row = saleToRow(sale);
-      const info = insert.run(row);
-      if (info.changes > 0) added++;
-    }
-    return added;
-  });
-
-  const batch: StoredFeedSale[] = [];
-  for (const item of items) {
-    const collectionName = item.gift.collectionName || item.gift.title;
-    const modelName = item.gift.modelName;
-    if (!collectionName || !modelName) continue;
-    batch.push(toStoredFeedSale(item));
-  }
-
-  return runBatch(batch);
 }
 
 export function countSales(database: Database.Database): number {

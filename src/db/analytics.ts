@@ -205,19 +205,9 @@ const collectionPriceHistoryStmt = db.prepare(`
   ORDER BY ts ASC
 `);
 
-const avgDaysHeldStmt = db.prepare(`
-  SELECT
-    AVG((ts - CAST(strftime('%s', json_extract(raw_json, '$.gift.receivedDate')) AS REAL)))
-      / 86400.0 AS avg_days
-  FROM sales
-  WHERE collection_name = ? AND model_name = ? AND ts >= ?
-    AND json_extract(raw_json, '$.gift.receivedDate') IS NOT NULL
-`);
-
 const saleByIdStmt = db.prepare(`
   SELECT
-    id, collection_name, model_name, gift_number, backdrop_name, symbol_name,
-    amount_nano, date, raw_json
+    id, collection_name, model_name, backdrop_name, amount_nano, ts
   FROM sales WHERE id = ?
 `);
 
@@ -493,19 +483,6 @@ export function getSalesPerDay(
   return count / days;
 }
 
-export function getAvgDaysHeld(
-  collection: string,
-  model: string,
-  days = 30,
-): number | null {
-  const since = cutoffTs(days);
-  const row = avgDaysHeldStmt.get(collection, model, since) as
-    | { avg_days: number | null }
-    | undefined;
-  if (row?.avg_days == null || Number.isNaN(row.avg_days)) return null;
-  return row.avg_days;
-}
-
 function netMargin(
   listingPrice: number,
   referencePrice: number,
@@ -749,12 +726,9 @@ export interface SaleRow {
   id: string;
   collection_name: string;
   model_name: string;
-  gift_number: number;
   backdrop_name: string;
-  symbol_name: string;
   amount_nano: number;
-  date: string;
-  raw_json: string;
+  ts: number;
 }
 
 export function getSaleById(id: string): SaleRow | undefined {

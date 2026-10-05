@@ -53,12 +53,8 @@ CREATE TABLE IF NOT EXISTS sales (
   collection_name TEXT NOT NULL,
   model_name TEXT NOT NULL,
   backdrop_name TEXT NOT NULL DEFAULT '',
-  symbol_name TEXT NOT NULL DEFAULT '',
-  gift_number INTEGER NOT NULL,
   amount_nano INTEGER NOT NULL,
-  date TEXT NOT NULL,
-  ts INTEGER NOT NULL,
-  raw_json TEXT NOT NULL
+  ts INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_sales_coll_model_ts
