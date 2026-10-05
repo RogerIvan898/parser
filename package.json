@@ -1,0 +1,29 @@
+{
+  "name": "mrkt-parser",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "parse:lots": "tsx src/parse-lots.ts",
+    "parse": "tsx src/parser.ts",
+    "server": "tsx src/server.ts",
+    "sync-db": "tsx src/sync-mrkt-db.ts",
+    "catalog:hydrate": "tsx src/catalog-hydrate.ts"
+  },
+  "dependencies": {
+    "@fastify/static": "^10.1.5",
+    "@inquirer/prompts": "^8.7.2",
+    "@mtcute/node": "^0.32.3",
+    "better-sqlite3": "^13.0.3",
+    "dotenv": "^16.4.5",
+    "fastify": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^22.7.4",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2"
+  }
+}

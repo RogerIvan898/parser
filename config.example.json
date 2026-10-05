@@ -1,0 +1,8 @@
+{
+  "mrktAuth": "",
+  "telegram": {
+    "apiId": 1234567,
+    "apiHash": "abcdef1234567890abcdef1234567890",
+    "phone": ""
+  }
+}
