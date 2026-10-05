@@ -32,6 +32,12 @@ Bothost при старте монтирует Git на `/app` и скрывае
 - `PARSER_AUTOSTART` — `0`, чтобы не парсить после старта сервера
 - `PARSER_DELAY_MS`, `PARSER_FEED_PAGES` (по умолчанию 5 страниц × 20 = цель 100), `PARSER_HISTORY_ROUND_MS` — и для сервера, и для `npm run parse`
 
+## Сканер saling (настройки веба)
+
+Включение: **Настройки → Сканер лотов (saling)** → `data/parse-config.json`.
+
+Периодически `POST https://api.tgmrkt.io/api/v1/gifts/saling` с телом без фильтров (`collectionNames: []`, …), `ordering: "None"`, `lowToHigh: false`, `count: 20` — как в клиенте MRKT. Это **лента недавно выставленных лотов**, не сортировка по цене. Выгодные по `decide()` попадают в `data/profit-deals.json`; API: `GET /api/profit-deals`.
+
 ## Данные
 
 `data/` не в Git. На Bothost каталог и `history.db` пишутся в `/app/data`. Отдельный `npm run parse` после деплоя не нужен, если задан `MRKT_AUTH`.

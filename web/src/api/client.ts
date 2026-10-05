@@ -113,6 +113,14 @@ export interface ParseConfigResponse {
   parserFeedPages: number;
   parserHistoryRoundMs: number;
   parserEnvDefaults?: ParserTimingResponse;
+  salingScannerEnabled: boolean;
+  salingScannerTiming?: {
+    modelDelayMs: number;
+    intervalMs: number;
+    jitterMs: number;
+  };
+  feeRate: number;
+  defaultFeeRate?: number;
 }
 
 export async function getLiquidity(days: number) {
@@ -134,6 +142,10 @@ export async function getParseConfig(): Promise<ParseConfigResponse> {
     parserFeedPages: Number(data.parserFeedPages) || 5,
     parserHistoryRoundMs: Number(data.parserHistoryRoundMs) || 1200,
     parserEnvDefaults: data.parserEnvDefaults,
+    salingScannerEnabled: data.salingScannerEnabled === true,
+    salingScannerTiming: data.salingScannerTiming,
+    feeRate: Number(data.feeRate) || 0.02,
+    defaultFeeRate: Number(data.defaultFeeRate) || 0.02,
   };
 }
 
@@ -143,6 +155,8 @@ export async function saveParseConfig(payload: {
   parserDelayMs?: number;
   parserFeedPages?: number;
   parserHistoryRoundMs?: number;
+  salingScannerEnabled?: boolean;
+  feeRate?: number;
 }) {
   const { data } = await api.put('/parse-config', payload);
   return data;

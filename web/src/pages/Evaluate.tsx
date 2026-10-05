@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { useMutation } from '@tanstack/react-query';
-import { decide } from '@/api/client';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { decide, getParseConfig } from '@/api/client';
 import type { DealVerdict } from '@/api/types';
 import CollectionModelSelect from '@/components/CollectionModelSelect';
 import BackdropSelect from '@/components/BackdropSelect';
@@ -17,6 +17,11 @@ const SCOPE_LABEL: Record<string, string> = {
 
 export function Evaluate() {
   const { defaultDays, defaultFeeRate } = useSettings();
+  const parseCfg = useQuery({
+    queryKey: ['parse-config'],
+    queryFn: getParseConfig,
+  });
+  const feeRate = parseCfg.data?.feeRate ?? defaultFeeRate;
   const catalog = useCatalog();
   const [collection, setCollection] = useState('');
   const [model, setModel] = useState('');
@@ -43,7 +48,7 @@ export function Evaluate() {
         backdrop: backdrop.trim() || null,
         price: Number(price),
         days: defaultDays,
-        feeRate: defaultFeeRate,
+        feeRate,
       }),
   });
 

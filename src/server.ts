@@ -44,7 +44,14 @@ import {
   HISTORY_FEED_BACKDROP_NAMES,
   getParserTiming,
   getParserEnvDefaults,
+  isSalingScannerEnabled,
+  SALING_SCANNER_MODEL_DELAY_MS,
+  SALING_SCANNER_INTERVAL_MS,
+  SALING_SCANNER_JITTER_MS,
+  getParseFeeRate,
+  DEFAULT_FEE_RATE,
 } from './parse-config.js';
+import { loadProfitDeals } from './saling-scanner.js';
 import { listLiquidItems } from './db/liquidity.js';
 import { ensureCatalogCollectionsFromApi } from './catalog-bootstrap.js';
 
@@ -63,10 +70,11 @@ function parsePositiveInt(
   return Math.floor(n);
 }
 
-function parseFeeRate(value: unknown, fallback = 0.05): number {
-  if (value === undefined || value === null) return fallback;
+function parseFeeRate(value: unknown, fallback?: number): number {
+  const base = fallback ?? getParseFeeRate();
+  if (value === undefined || value === null) return base;
   const n = Number(value);
-  if (!Number.isFinite(n) || n < 0 || n >= 1) return fallback;
+  if (!Number.isFinite(n) || n < 0 || n >= 1) return base;
   return n;
 }
 
@@ -161,6 +169,16 @@ api.get('/parse-config', async (_req, reply) => {
       parserFeedPages: timing.feedPages,
       parserHistoryRoundMs: timing.historyRoundMs,
       parserEnvDefaults: envDefaults,
+      salingScannerEnabled: cfg.salingScannerEnabled,
+      salingScannerTiming: {
+        modelDelayMs: cfg.salingScannerEnabled
+          ? SALING_SCANNER_MODEL_DELAY_MS
+          : timing.delayMs,
+        intervalMs: SALING_SCANNER_INTERVAL_MS,
+        jitterMs: SALING_SCANNER_JITTER_MS,
+      },
+      feeRate: getParseFeeRate(),
+      defaultFeeRate: DEFAULT_FEE_RATE,
     });
   } catch (err) {
     return reply.code(500).send({ error: (err as Error).message });
@@ -174,6 +192,8 @@ api.put('/parse-config', async (req, reply) => {
     parserDelayMs?: unknown;
     parserFeedPages?: unknown;
     parserHistoryRoundMs?: unknown;
+    salingScannerEnabled?: unknown;
+    feeRate?: unknown;
   };
   if (!Array.isArray(body.enabledCollections)) {
     return reply
@@ -222,6 +242,23 @@ api.put('/parse-config', async (req, reply) => {
     return reply.code(400).send({ error: 'parserHistoryRoundMs: 0–3600000' });
   }
 
+  const salingScannerEnabled =
+    body.salingScannerEnabled === undefined
+      ? undefined
+      : Boolean(body.salingScannerEnabled);
+  let feeRateSave: number | null | undefined;
+  if (body.feeRate !== undefined) {
+    if (body.feeRate === null) {
+      feeRateSave = null;
+    } else {
+      const n = Number(body.feeRate);
+      if (!Number.isFinite(n) || n < 0 || n >= 1) {
+        return reply.code(400).send({ error: 'feeRate: число от 0 до 1' });
+      }
+      feeRateSave = n;
+    }
+  }
+
   try {
     saveParseConfig({
       enabledCollections: enabled,
@@ -229,6 +266,8 @@ api.put('/parse-config', async (req, reply) => {
       parserDelayMs,
       parserFeedPages,
       parserHistoryRoundMs,
+      salingScannerEnabled,
+      feeRate: feeRateSave,
     });
     const cfg = loadParseConfig();
     const timing = getParserTiming();
@@ -239,6 +278,24 @@ api.put('/parse-config', async (req, reply) => {
       parserDelayMs: timing.delayMs,
       parserFeedPages: timing.feedPages,
       parserHistoryRoundMs: timing.historyRoundMs,
+      salingScannerEnabled: cfg.salingScannerEnabled,
+      feeRate: getParseFeeRate(),
+    });
+  } catch (err) {
+    return reply.code(500).send({ error: (err as Error).message });
+  }
+});
+
+api.get('/profit-deals', async (req, reply) => {
+  const q = req.query as Record<string, unknown>;
+  const limit = parsePositiveInt(q.limit, 50);
+  try {
+    const data = loadProfitDeals(limit);
+    return reply.send({
+      file: 'profit-deals.json',
+      updatedAt: data.updatedAt,
+      total: data.count,
+      deals: data.deals,
     });
   } catch (err) {
     return reply.code(500).send({ error: (err as Error).message });
@@ -466,7 +523,7 @@ api.get('/deals', async (req, reply) => {
   if (!Number.isFinite(minDiscount) || minDiscount < 0) {
     return reply.code(400).send({ error: 'minDiscount должен быть числом >= 0' });
   }
-  const feeRate = 0.05;
+  const feeRate = getParseFeeRate();
 
   try {
     const res = await fetchSalingWithRetry(
@@ -587,6 +644,10 @@ async function main(): Promise<void> {
     () => {
       console.log('[server] MRKT: токен OK');
       void runHostedParserLoop();
+      void import('./saling-scanner.js').then((m) => m.runSalingScannerLoop());
+      if (isSalingScannerEnabled()) {
+        console.log('[server] saling-сканер будет опрашивать маркет (настройки)');
+      }
     },
     (err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);

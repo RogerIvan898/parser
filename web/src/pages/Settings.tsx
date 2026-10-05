@@ -41,6 +41,7 @@ export function Settings() {
   const [localDelayMs, setLocalDelayMs] = useState('400');
   const [localFeedPages, setLocalFeedPages] = useState('5');
   const [localHistoryRoundMs, setLocalHistoryRoundMs] = useState('1200');
+  const [salingScannerEnabled, setSalingScannerEnabled] = useState(false);
   const [parseDirty, setParseDirty] = useState(false);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -60,7 +61,11 @@ export function Settings() {
     setLocalDelayMs(String(parseQuery.data.parserDelayMs));
     setLocalFeedPages(String(parseQuery.data.parserFeedPages));
     setLocalHistoryRoundMs(String(parseQuery.data.parserHistoryRoundMs));
-  }, [parseQuery.data, parseDirty]);
+    setSalingScannerEnabled(parseQuery.data.salingScannerEnabled);
+    const fee = parseQuery.data.feeRate ?? 0.02;
+    setLocalFeePercent(String(feePercentFromRate(fee)));
+    setDefaultFeeRate(fee);
+  }, [parseQuery.data, parseDirty, setDefaultFeeRate]);
 
   const allSelected = useMemo(
     () =>
@@ -88,12 +93,11 @@ export function Settings() {
     setSaving(true);
     const days = Math.max(1, Math.floor(Number(localDays) || 7));
     const feePercent = Number(localFeePercent);
+    const feeRate = Number.isFinite(feePercent)
+      ? feeRateFromPercent(feePercent)
+      : defaultFeeRate;
     setDefaultDays(days);
-    setDefaultFeeRate(
-      Number.isFinite(feePercent)
-        ? feeRateFromPercent(feePercent)
-        : defaultFeeRate,
-    );
+    setDefaultFeeRate(feeRate);
     try {
       const delayMs = Math.min(
         60_000,
@@ -115,6 +119,8 @@ export function Settings() {
         parserDelayMs: delayMs,
         parserFeedPages: feedPages,
         parserHistoryRoundMs: historyRoundMs,
+        salingScannerEnabled,
+        feeRate,
       });
       setParseDirty(false);
       await parseQuery.refetch();
@@ -134,7 +140,9 @@ export function Settings() {
       <div className="card">
         <h2 style={{ marginTop: 0, fontSize: 16 }}>Оценка лота</h2>
         <p style={{ color: 'var(--text-dim)', marginTop: 0 }}>
-          Окно продаж и комиссия при перепродаже.
+          Дней — для оценки в UI. Комиссия сохраняется на сервере (
+          <code>parse-config.json</code>): saling-сканер, <code>/deals</code>,
+          оценка по умолчанию. По умолчанию <b>2%</b>.
         </p>
         <div className="form-row">
           <div className="form-field">
@@ -154,18 +162,47 @@ export function Settings() {
               max={100}
               step={0.1}
               value={localFeePercent}
-              onChange={(e) => setLocalFeePercent(e.target.value)}
+              onChange={(e) => {
+                setParseDirty(true);
+                setLocalFeePercent(e.target.value);
+              }}
             />
           </div>
         </div>
       </div>
 
       <div className="card">
+        <h2 style={{ marginTop: 0, fontSize: 16 }}>Сканер лотов (saling)</h2>
+        <label className="parse-config-item parse-config-item--toggle">
+          <input
+            type="checkbox"
+            className="parse-config-checkbox"
+            checked={salingScannerEnabled}
+            onChange={(e) => {
+              setParseDirty(true);
+              setSalingScannerEnabled(e.target.checked);
+            }}
+          />
+          <span className="parse-config-item__name">
+            Опрашивать <code>POST /gifts/saling</code> и писать выгодные лоты в{' '}
+            <code>data/profit-deals.json</code>
+          </span>
+        </label>
+        <p style={{ color: 'var(--text-dim)', fontSize: 13, margin: '8px 0 0' }}>
+          Включено: история/модели — пауза <b>5 с</b>, saling — ~<b>3 с</b> ±{' '}
+          <b>1 с</b>. Запрос без фильтров, <code>ordering: None</code>,{' '}
+          <code>count: 20</code> — в ответе <b>недавно выставленные</b> лоты (лента
+          MRKT), не поиск самых дешёвых. Вердикт <code>buy</code> + ликвидность из{' '}
+          <code>mrkt.db</code>; только отмеченные коллекции.{' '}
+          <code>GET /api/profit-deals</code>.
+        </p>
+      </div>
+
+      <div className="card">
         <h2 style={{ marginTop: 0, fontSize: 16 }}>Скорость парсера</h2>
         <p style={{ color: 'var(--text-dim)', marginTop: 0 }}>
-          Применяется на сервере между запросами к MRKT (автопарсер на
-          Bothost). Перезапуск не нужен — после «Сохранить» следующая пауза
-          уже с новыми значениями.
+          Применяется между запросами каталога/history. Не действует, если
+          включён сканер saling (там фиксированно 5 с). Перезапуск не нужен.
         </p>
         <div className="form-row">
           <div className="form-field">

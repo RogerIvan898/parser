@@ -24,7 +24,20 @@ export interface ParseConfig {
   parserDelayMs: number | null;
   parserFeedPages: number | null;
   parserHistoryRoundMs: number | null;
+  /** Параллельный опрос POST /gifts/saling и запись выгодных лотов в profit-deals.json */
+  salingScannerEnabled: boolean;
+  /** Доля комиссии MRKT при перепродаже (0–1). null → DEFAULT_FEE_RATE */
+  feeRate: number | null;
 }
+
+export const DEFAULT_FEE_RATE = 0.02;
+
+/** При включённом saling-сканере пауза между запросами каталога/history */
+export const SALING_SCANNER_MODEL_DELAY_MS = 5000;
+/** Базовый интервал опроса saling */
+export const SALING_SCANNER_INTERVAL_MS = 3000;
+/** Случайный разброс ± jitter к интервалу saling */
+export const SALING_SCANNER_JITTER_MS = 1000;
 
 /** Фоны для доп. запросов history (не весь catalog.json). */
 export const HISTORY_FEED_BACKDROP_NAMES = ['Black', 'Onyx Black'] as const;
@@ -42,7 +55,21 @@ function emptyConfig(): ParseConfig {
     parserDelayMs: null,
     parserFeedPages: null,
     parserHistoryRoundMs: null,
+    salingScannerEnabled: false,
+    feeRate: null,
   };
+}
+
+function parseFeeRateConfig(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0 || n >= 1) return null;
+  return n;
+}
+
+export function getParseFeeRate(): number {
+  const cfg = loadParseConfig();
+  return cfg.feeRate ?? DEFAULT_FEE_RATE;
 }
 
 function parseOptionalPositiveInt(
@@ -79,6 +106,16 @@ export function getParserTiming(): ParserTiming {
   };
 }
 
+export function isSalingScannerEnabled(): boolean {
+  return loadParseConfig().salingScannerEnabled === true;
+}
+
+/** Пауза парсера моделей/history: в режиме saling фиксированно 5 с. */
+export function getEffectiveParserDelayMs(): number {
+  if (isSalingScannerEnabled()) return SALING_SCANNER_MODEL_DELAY_MS;
+  return getParserTiming().delayMs;
+}
+
 function normalizeConfig(raw: Partial<ParseConfig>): ParseConfig {
   return {
     version: 1,
@@ -99,6 +136,8 @@ function normalizeConfig(raw: Partial<ParseConfig>): ParseConfig {
       0,
       3_600_000,
     ),
+    salingScannerEnabled: raw.salingScannerEnabled === true,
+    feeRate: parseFeeRateConfig(raw.feeRate),
   };
 }
 
@@ -131,6 +170,8 @@ export interface SaveParseConfigInput {
   parserDelayMs?: number | null;
   parserFeedPages?: number | null;
   parserHistoryRoundMs?: number | null;
+  salingScannerEnabled?: boolean;
+  feeRate?: number | null;
 }
 
 export function saveParseConfig(input: SaveParseConfigInput): void {
@@ -161,6 +202,15 @@ export function saveParseConfig(input: SaveParseConfigInput): void {
       input.parserHistoryRoundMs === null
         ? null
         : parseOptionalPositiveInt(input.parserHistoryRoundMs, 0, 3_600_000);
+  }
+  if (input.salingScannerEnabled !== undefined) {
+    next.salingScannerEnabled = Boolean(input.salingScannerEnabled);
+  }
+  if (input.feeRate !== undefined) {
+    next.feeRate =
+      input.feeRate === null
+        ? null
+        : parseFeeRateConfig(input.feeRate);
   }
   writeParseConfig(next);
 }

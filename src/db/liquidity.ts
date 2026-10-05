@@ -172,6 +172,47 @@ export interface ListLiquidOptions {
   collectionFilter?: string | null;
 }
 
+/** Метрики ликвидности для одной пары (без фильтра «попадает в топ»). */
+export function getModelLiquiditySnapshot(
+  collection: string,
+  model: string,
+  days = 7,
+): Omit<LiquidItemRow, 'collection' | 'model'> | null {
+  const since = nowTs() - days * 86400;
+  const now = nowTs();
+  const row = db
+    .prepare(
+      `
+    SELECT COUNT(*) AS samples, MAX(ts) AS last_ts
+    FROM sales
+    WHERE collection_name = ? AND model_name = ? AND ts >= ?
+  `,
+    )
+    .get(collection, model, since) as
+    | { samples: number; last_ts: number | null }
+    | undefined;
+  if (!row || row.samples < 1 || row.last_ts == null) return null;
+
+  const stats = getModelPriceStats(collection, model, days);
+  const lastSaleAgeDays = (now - row.last_ts) / 86400;
+  const salesPerDay = row.samples / days;
+  const medianTon = stats.median;
+  const iqrRatio =
+    medianTon > 0 ? (stats.p75 - stats.p25) / medianTon : null;
+
+  return {
+    samples: row.samples,
+    salesPerDay,
+    lastSaleAgeDays,
+    lastSaleTon: stats.last,
+    medianTon,
+    iqrRatio,
+    trend: computeTrend(collection, model, since),
+    confidence: liquidityConfidence(row.samples, lastSaleAgeDays, iqrRatio),
+    freshness: freshnessFromAge(lastSaleAgeDays),
+  };
+}
+
 export function listLiquidItems(
   days: number,
   limit?: number | null,

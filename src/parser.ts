@@ -52,6 +52,7 @@ import {
   isHistoryFetchBackdropsEnabled,
   getHistoryFeedBackdropNames,
   countEnabledForParse,
+  getEffectiveParserDelayMs,
   getParserTiming,
 } from './parse-config.js';
 import {
@@ -66,7 +67,7 @@ const FEED_TIMEOUT_MS = Number(process.env.PARSER_FEED_TIMEOUT_MS) || 60_000;
 export const FEED_API_PAGE_SIZE = 20;
 
 function parserDelayMs(): number {
-  return getParserTiming().delayMs;
+  return getEffectiveParserDelayMs();
 }
 
 function argValue(flag: string): string | undefined {

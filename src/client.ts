@@ -248,6 +248,14 @@ export async function fetchAllModels(
 // POST /api/v1/gifts/saling
 // ============================================================
 
+/**
+ * Лента saling без фильтров (ordering `None`): MRKT отдаёт недавно выставленные лоты,
+ * не сортировку «самые дешёвые». Используется сканером profit-deals.
+ */
+export function makeSalingScannerFeedRequest(): SalingRequest {
+  return makeDefaultSalingRequest({ count: 20, cursor: '' });
+}
+
 export function makeDefaultSalingRequest(
   overrides: Partial<SalingRequest> = {},
 ): SalingRequest {

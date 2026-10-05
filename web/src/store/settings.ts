@@ -16,7 +16,7 @@ export const useSettings = create<SettingsState>()(
     (set) => ({
       apiBase: import.meta.env.VITE_API_BASE || '/api',
       defaultDays: 7,
-      defaultFeeRate: 0.05,
+      defaultFeeRate: 0.02,
       setDefaultDays: (v) => set({ defaultDays: v }),
       setDefaultFeeRate: (v) => set({ defaultFeeRate: v }),
     }),
