@@ -335,12 +335,38 @@ function iqrRatioOf(stats: PriceStats): number | null {
   return (stats.p75 - stats.p25) / stats.median;
 }
 
-/** Мин. продаж/день от медианы среза (как на странице ликвидности). */
-function minSalesPerDayForSlice(medianTon: number): number {
+/** Порог продаж/день для коллекции. Редкий фон этим не меряем. */
+function minCollectionSalesPerDay(medianTon: number): number {
   if (medianTon <= 0) return 0.2;
   if (medianTon < 10) return 0.5;
   if (medianTon <= 100) return 0.2;
   return 0.05;
+}
+
+/**
+ * Ликвидность сделки: сначала коллекция, затем мягко модель.
+ * Срез «модель+фон» (монохром) на ликвидность не смотрит — у него своя медиана цены.
+ */
+function liquidityBlockReason(
+  collection: string,
+  model: string,
+  days: number,
+): string | null {
+  const coll = getCollectionStats(collection, days);
+  const collPerDay = coll.samples / days;
+  const minColl = minCollectionSalesPerDay(coll.median);
+  if (coll.samples < 30 || collPerDay < minColl) {
+    return (
+      `коллекция неликвидная: ${coll.samples} продаж, ` +
+      `${collPerDay.toFixed(2)}/день (нужно ≥ 30 и ≥ ${minColl}/день)`
+    );
+  }
+  if (!model) return null;
+  const modelStats = getModelPriceStats(collection, model, days);
+  if (modelStats.samples < 5) {
+    return `у модели мало продаж (${modelStats.samples} за ${days} дн.)`;
+  }
+  return null;
 }
 
 export function getStatsSmart(
@@ -694,16 +720,16 @@ export function decideFromSales(
       metrics,
     };
   }
-  const minPerDay = minSalesPerDayForSlice(referencePrice);
-  if (priceOk && salesPerDay < minPerDay) {
-    return {
-      action: 'skip',
-      scope: stats.scope,
-      reason: `неликвидный срез «${slice}»: ${salesPerDay.toFixed(2)} продаж/день, нужно ≥ ${minPerDay}`,
-      metrics,
-    };
-  }
   if (priceOk) {
+    const illiquid = liquidityBlockReason(collection, modelTrimmed, days);
+    if (illiquid) {
+      return {
+        action: 'skip',
+        scope: stats.scope,
+        reason: illiquid,
+        metrics,
+      };
+    }
     return {
       action: 'buy',
       scope: stats.scope,
