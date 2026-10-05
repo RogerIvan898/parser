@@ -5,13 +5,11 @@ import {
   makeSalingScannerFeedRequest,
 } from './client.js';
 import type { Gift } from './types.js';
-import { nanoToTon, formatTon } from './types.js';
+import { nanoToTon } from './types.js';
 import {
   evaluateLotAllScopes,
-  type DealVerdict,
   type ScopedLotEvaluation,
 } from './db/analytics.js';
-import { getModelLiquiditySnapshot } from './db/liquidity.js';
 import {
   isSalingScannerEnabled,
   isCollectionEnabledForParse,
@@ -32,54 +30,28 @@ const MAX_RECORDS = 400;
  * Тело совпадает с `makeSalingScannerFeedRequest()` в client.ts (count: 20).
  */
 
-export interface ProfitDealLiquidity {
-  samples: number;
-  salesPerDay: number;
-  medianTon: number;
-  confidence: string;
-  freshness: string;
-  lastSaleAgeDays: number;
-  iqrRatio: number | null;
-  trend: number | null;
-}
-
-export interface ProfitDealScopeEval {
-  scope: string;
-  model: string | null;
-  backdrop: string | null;
-  action: DealVerdict['action'];
-  reason: string;
-  metrics: DealVerdict['metrics'];
-}
-
 export interface ProfitDealRecord {
   detectedAt: string;
   listingId: string;
   giftId: string;
-  url: string;
   collection: string;
   model: string;
   backdrop: string;
-  symbol: string;
-  number: number;
   priceTon: number;
-  priceFormatted: string;
-  /** Все срезы: коллекция; кол+модель; кол+фон; кол+модель+фон */
-  evaluations: ProfitDealScopeEval[];
-  /** Срезы с вердиктом buy */
-  buyScopes: string[];
-  /** Лучший buy по чистой марже */
   verdict: {
-    action: DealVerdict['action'];
-    reason: string;
-    metrics: DealVerdict['metrics'];
+    action: 'buy' | 'watch' | 'skip';
     scope: string;
+    metrics: {
+      netMargin: number;
+      discountVsMedian: number;
+      samples: number;
+      confidence: string;
+    };
   };
-  liquidity: ProfitDealLiquidity | null;
 }
 
 interface ProfitDealsStore {
-  version: 1;
+  version: 2;
   updatedAt: string;
   deals: ProfitDealRecord[];
 }
@@ -97,83 +69,135 @@ function salingPauseMs(): number {
 
 function loadStore(): ProfitDealsStore {
   if (!existsSync(PROFIT_DEALS_FILE)) {
-    return { version: 1, updatedAt: new Date().toISOString(), deals: [] };
+    return { version: 2, updatedAt: new Date().toISOString(), deals: [] };
   }
   try {
-    const raw = JSON.parse(readFileSync(PROFIT_DEALS_FILE, 'utf-8')) as ProfitDealsStore;
+    const raw = JSON.parse(readFileSync(PROFIT_DEALS_FILE, 'utf-8')) as {
+      deals?: unknown[];
+    };
+    const deals = (Array.isArray(raw.deals) ? raw.deals : [])
+      .map((d) => slimDealRecord(d))
+      .filter((d): d is ProfitDealRecord => d !== null);
     return {
-      version: 1,
-      updatedAt: raw.updatedAt ?? new Date().toISOString(),
-      deals: Array.isArray(raw.deals) ? raw.deals : [],
+      version: 2,
+      updatedAt: new Date().toISOString(),
+      deals,
     };
   } catch {
-    return { version: 1, updatedAt: new Date().toISOString(), deals: [] };
+    return { version: 2, updatedAt: new Date().toISOString(), deals: [] };
   }
+}
+
+function slimDealRecord(raw: unknown): ProfitDealRecord | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const listingId = o.listingId;
+  const giftId = o.giftId;
+  if (typeof listingId !== 'string' || typeof giftId !== 'string') return null;
+
+  const legacyVerdict = o.verdict as Record<string, unknown> | undefined;
+  const metrics = (legacyVerdict?.metrics ?? o.metrics) as
+    | Record<string, unknown>
+    | undefined;
+  if (!metrics || typeof metrics !== 'object') return null;
+
+  const scope =
+    typeof legacyVerdict?.scope === 'string'
+      ? legacyVerdict.scope
+      : typeof o.scope === 'string'
+        ? o.scope
+        : '';
+  const action = legacyVerdict?.action ?? o.action;
+  if (action !== 'buy' && action !== 'watch' && action !== 'skip') return null;
+
+  return {
+    detectedAt:
+      typeof o.detectedAt === 'string'
+        ? o.detectedAt
+        : new Date().toISOString(),
+    listingId,
+    giftId,
+    collection: String(o.collection ?? ''),
+    model: String(o.model ?? ''),
+    backdrop: String(o.backdrop ?? ''),
+    priceTon: Number(o.priceTon) || 0,
+    verdict: {
+      action,
+      scope,
+      metrics: {
+        netMargin: Number(metrics.netMargin) || 0,
+        discountVsMedian: Number(metrics.discountVsMedian) || 0,
+        samples: Number(metrics.samples) || 0,
+        confidence: String(metrics.confidence ?? 'low'),
+      },
+    },
+  };
 }
 
 function saveStore(store: ProfitDealsStore): void {
   mkdirSync(DATA_DIR, { recursive: true });
+  store.version = 2;
   store.updatedAt = new Date().toISOString();
   writeFileSync(PROFIT_DEALS_FILE, JSON.stringify(store, null, 2), 'utf-8');
 }
 
 function giftToRecord(
   gift: Gift,
-  scoped: ScopedLotEvaluation[],
   bestBuy: ScopedLotEvaluation,
 ): ProfitDealRecord {
   const collection = gift.collectionName || gift.collectionTitle || gift.title;
   const model = gift.modelName || gift.modelTitle || '';
-  const listingTon = nanoToTon(gift.salePrice);
-  const liq = model
-    ? getModelLiquiditySnapshot(collection, model, ANALYSIS_DAYS)
-    : null;
-
-  const evaluations: ProfitDealScopeEval[] = scoped.map((s) => ({
-    scope: s.scope,
-    model: s.model,
-    backdrop: s.backdrop,
-    action: s.verdict.action,
-    reason: s.verdict.reason,
-    metrics: s.verdict.metrics,
-  }));
-  const buyScopes = scoped
-    .filter((s) => s.verdict.action === 'buy')
-    .map((s) => s.scope);
+  const m = bestBuy.verdict.metrics;
 
   return {
     detectedAt: new Date().toISOString(),
     listingId: gift.id,
     giftId: gift.giftIdString,
-    url: `https://t.me/mrkt/app?startapp=gift_${gift.giftIdString}`,
     collection,
     model,
     backdrop: gift.backdropName ?? '',
-    symbol: gift.symbolName ?? '',
-    number: gift.number,
-    priceTon: listingTon,
-    priceFormatted: formatTon(gift.salePrice, 4),
-    evaluations,
-    buyScopes,
+    priceTon: nanoToTon(gift.salePrice),
     verdict: {
       action: bestBuy.verdict.action,
-      reason: bestBuy.verdict.reason,
-      metrics: bestBuy.verdict.metrics,
       scope: bestBuy.scope,
+      metrics: {
+        netMargin: m.netMargin,
+        discountVsMedian: m.discountVsMedian,
+        samples: m.samples,
+        confidence: m.confidence,
+      },
     },
-    liquidity: liq
-      ? {
-          samples: liq.samples,
-          salesPerDay: liq.salesPerDay,
-          medianTon: liq.medianTon,
-          confidence: liq.confidence,
-          freshness: liq.freshness,
-          lastSaleAgeDays: liq.lastSaleAgeDays,
-          iqrRatio: liq.iqrRatio,
-          trend: liq.trend,
-        }
-      : null,
   };
+}
+
+function formatScopeEval(s: ScopedLotEvaluation): string {
+  const d = Math.round(s.verdict.metrics.discountVsMedian * 100);
+  const m = Math.round(s.verdict.metrics.netMargin * 100);
+  const n = s.verdict.metrics.samples;
+  return `${s.scope}=${s.verdict.action}(Δ${d}% M${m}% n=${n})`;
+}
+
+function logSalingLotAnalysis(
+  gift: Gift,
+  collection: string,
+  listingTon: number,
+  scoped: ScopedLotEvaluation[],
+): void {
+  const model = gift.modelName || '—';
+  const backdrop = gift.backdropName?.trim() || '—';
+  const scopes = scoped.map(formatScopeEval).join(' | ');
+  const best = scoped.reduce((a, b) => {
+    const rank = { buy: 3, watch: 2, skip: 1 };
+    const ar = rank[a.verdict.action];
+    const br = rank[b.verdict.action];
+    if (br !== ar) return br > ar ? b : a;
+    return b.verdict.metrics.netMargin > a.verdict.metrics.netMargin ? b : a;
+  });
+  console.log(
+    `[saling] анализ ${collection} / ${model} / ${backdrop} #${gift.number} ` +
+      `${listingTon.toFixed(3)} TON id=${(gift.id || gift.giftIdString).slice(0, 12)} → ${scopes} ` +
+      `[лучший: ${best.scope} ${best.verdict.action}]`,
+  );
 }
 
 function upsertDeal(store: ProfitDealsStore, record: ProfitDealRecord): boolean {
@@ -238,6 +262,8 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
       feeRate,
     );
 
+    logSalingLotAnalysis(gift, collection, listingTon, scoped);
+
     const buys = scoped.filter((s) => s.verdict.action === 'buy');
     if (buys.length === 0) continue;
 
@@ -247,7 +273,7 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
     const bestBuy = buys.reduce((a, b) =>
       a.verdict.metrics.netMargin >= b.verdict.metrics.netMargin ? a : b,
     );
-    const record = giftToRecord(gift, scoped, bestBuy);
+    const record = giftToRecord(gift, bestBuy);
     if (upsertDeal(store, record)) added++;
   }
 
