@@ -821,6 +821,26 @@ export function evaluateLotAllScopes(
   });
 }
 
+/** От широкого к узкому. Узкий срез с достаточной выборкой перекрывает широкий. */
+const SCOPE_SPECIFICITY: Record<StatsWithConfidence['scope'], number> = {
+  collection: 0,
+  model: 1,
+  'collection+backdrop': 2,
+  'model+backdrop': 3,
+};
+
+export function pickVerdictWideToNarrow(
+  scoped: ScopedLotEvaluation[],
+): ScopedLotEvaluation | null {
+  const usable = scoped.filter(
+    (s) => s.verdict.metrics.samples >= MIN_SAMPLES_TO_EVALUATE,
+  );
+  if (usable.length === 0) return null;
+  return usable.reduce((best, cur) =>
+    SCOPE_SPECIFICITY[cur.scope] > SCOPE_SPECIFICITY[best.scope] ? cur : best,
+  );
+}
+
 export function getPriceHistory(
   collection: string,
   model: string,

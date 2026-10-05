@@ -8,6 +8,7 @@ import type { Gift } from './types.js';
 import { nanoToTon } from './types.js';
 import {
   evaluateLotAllScopes,
+  pickVerdictWideToNarrow,
   type ScopedLotEvaluation,
 } from './db/analytics.js';
 import {
@@ -187,17 +188,14 @@ function logSalingLotAnalysis(
   const model = gift.modelName || '—';
   const backdrop = gift.backdropName?.trim() || '—';
   const scopes = scoped.map(formatScopeEval).join(' | ');
-  const best = scoped.reduce((a, b) => {
-    const rank = { buy: 3, watch: 2, skip: 1 };
-    const ar = rank[a.verdict.action];
-    const br = rank[b.verdict.action];
-    if (br !== ar) return br > ar ? b : a;
-    return b.verdict.metrics.netMargin > a.verdict.metrics.netMargin ? b : a;
-  });
+  const chosen = pickVerdictWideToNarrow(scoped);
+  const tail = chosen
+    ? `[вердикт: ${chosen.scope} ${chosen.verdict.action}]`
+    : '[вердикт: нет среза с достаточной выборкой]';
   console.log(
     `[saling] анализ ${collection} / ${model} / ${backdrop} #${gift.number} ` +
       `${listingTon.toFixed(3)} TON id=${(gift.id || gift.giftIdString).slice(0, 12)} → ${scopes} ` +
-      `[лучший: ${best.scope} ${best.verdict.action}]`,
+      tail,
   );
 }
 
@@ -265,16 +263,13 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
 
     logSalingLotAnalysis(gift, collection, listingTon, scoped);
 
+    const chosen = pickVerdictWideToNarrow(scoped);
     const buys = scoped.filter((s) => s.verdict.action === 'buy');
-    if (buys.length === 0) continue;
+    buyScopeHits += buys.length;
+    if (!chosen || chosen.verdict.action !== 'buy') continue;
 
     buyLots++;
-    buyScopeHits += buys.length;
-
-    const bestBuy = buys.reduce((a, b) =>
-      a.verdict.metrics.netMargin >= b.verdict.metrics.netMargin ? a : b,
-    );
-    const record = giftToRecord(gift, bestBuy);
+    const record = giftToRecord(gift, chosen);
     if (upsertDeal(store, record)) added++;
   }
 
