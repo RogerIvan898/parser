@@ -506,14 +506,8 @@ function bootstrapMrktDb(): void {
 }
 
 async function main(): Promise<void> {
+  console.log(`[server] старт PORT=${PORT} cwd=${process.cwd()}`);
   bootstrapMrktDb();
-
-  try {
-    await initClient();
-  } catch (err) {
-    console.error('[server] auth:', err);
-    process.exit(1);
-  }
 
   if (existsSync(WEB_DIST)) {
     await app.register(fastifyStatic, { root: WEB_DIST });
@@ -524,10 +518,23 @@ async function main(): Promise<void> {
       return reply.code(404).send({ error: 'not found' });
     });
     console.log(`[server] UI: ${WEB_DIST}`);
+  } else {
+    console.warn('[server] нет web/dist/index.html — отдаём только API');
   }
 
   await app.listen({ port: PORT, host: '0.0.0.0' });
-  console.log(`[server] http://0.0.0.0:${PORT}`);
+  console.log(`[server] готов: http://0.0.0.0:${PORT}`);
+
+  void initClient().then(
+    () => console.log('[server] MRKT: токен OK'),
+    (err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(
+        '[server] MRKT: нет токена (добавь MRKT_AUTH в env) — история/статистика из БД работают, лайв /deals нет:',
+        msg.split('\n')[0],
+      );
+    },
+  );
 }
 
 main().catch((err) => {

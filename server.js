@@ -48,4 +48,10 @@ if (!existsSync(entry)) {
   process.exit(1);
 }
 
-await import(entry);
+console.log('[start] запуск API (dist/server.js)…');
+try {
+  await import(entry);
+} catch (err) {
+  console.error('[start] ошибка загрузки API:', err);
+  process.exit(1);
+}
