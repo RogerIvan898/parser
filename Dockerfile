@@ -25,4 +25,4 @@ RUN mkdir -p /app/data && chmod 777 /app/data
 
 EXPOSE 3000
 
-CMD ["node", "/usr/src/app/dist/server.js"]
+CMD ["node", "/usr/src/app/boot.js"]

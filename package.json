@@ -6,7 +6,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc && node scripts/postbuild.mjs",
     "build:all": "npm run build && npm run build --prefix web",
-    "start": "node server.js",
+    "start": "node boot.js",
     "parse:lots": "tsx src/parse-lots.ts",
     "parse": "tsx src/parser.ts",
     "server": "tsx src/server.ts",

@@ -63,6 +63,7 @@ console.log('[start] запуск API (dist/server.js)…');
 try {
   await import(pathToFileURL(entry).href);
 } catch (err) {
-  console.error('[start] ошибка загрузки API:', err);
+  const text = err instanceof Error ? (err.stack || err.message) : String(err);
+  console.error('[start] ошибка загрузки API:', text);
   process.exit(1);
 }

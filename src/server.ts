@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import {
@@ -45,7 +46,9 @@ import {
 import { listLiquidItems } from './db/liquidity.js';
 
 const PORT = Number(process.env.PORT) || 3000;
-const WEB_DIST = resolve(process.cwd(), 'web', 'dist');
+/** Рядом с dist/, не от cwd: Bothost часто стартует процесс из /app. */
+const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const WEB_DIST = resolve(APP_ROOT, 'web', 'dist');
 
 function parsePositiveInt(
   value: unknown,
