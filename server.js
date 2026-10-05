@@ -7,6 +7,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = dirname(fileURLToPath(import.meta.url));
+
 const entry = resolve(root, 'dist', 'server.js');
 const webDist = resolve(root, 'web', 'dist', 'index.html');
 
@@ -26,6 +27,7 @@ function ensureDependencies() {
   if (!existsSync(resolve(root, 'node_modules', 'typescript'))) {
     run('npm install', 'корень: npm install (typescript, tsc)');
   }
+
   if (!existsSync(resolve(root, 'web', 'node_modules', 'vite'))) {
     run('npm install --prefix web', 'web: npm install (vite)');
   }
@@ -33,6 +35,7 @@ function ensureDependencies() {
 
 function buildAll() {
   ensureDependencies();
+
   run('npm run build', 'сборка API (tsc)');
   if (!existsSync(webDist)) {
     run('npm run build --prefix web', 'сборка UI (vite)');
