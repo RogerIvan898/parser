@@ -73,6 +73,14 @@ export interface DealVerdict {
     samples7?: number;
     samples30?: number | null;
     priceStability?: number | null;
+    median7?: number;
+    median3?: number | null;
+    samples3?: number | null;
+    trend?: number | null;
+    trendDirection?: 'down' | 'up' | 'flat' | 'unknown';
+    trendAdjusted?: boolean;
+    recentBelowBaseRatio?: number | null;
+    baseReferencePrice?: number;
   };
 }
 
@@ -167,6 +175,14 @@ export interface SalingDealMetricsFull {
   samples7?: number;
   samples30?: number | null;
   priceStability?: number | null;
+  median7?: number;
+  median3?: number | null;
+  samples3?: number | null;
+  trend?: number | null;
+  trendDirection?: 'down' | 'up' | 'flat' | 'unknown';
+  trendAdjusted?: boolean;
+  recentBelowBaseRatio?: number | null;
+  baseReferencePrice?: number;
 }
 
 export interface SalingScopeVerdict {

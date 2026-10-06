@@ -155,6 +155,8 @@ function AnalysisDealsTable({
                             <th>Медиана</th>
                             <th>Δ</th>
                             <th>Маржа</th>
+                            <th>3д</th>
+                            <th>Тренд</th>
                             <th>пр/день</th>
                           </tr>
                         </thead>
@@ -173,6 +175,16 @@ function AnalysisDealsTable({
                               </td>
                               <td>{pct(s.metrics.discountVsMedian)}</td>
                               <td>{pct(s.metrics.netMargin)}</td>
+                              <td>
+                                {s.metrics.median3 != null
+                                  ? `${s.metrics.median3.toFixed(2)} (n=${s.metrics.samples3 ?? '—'})`
+                                  : '—'}
+                              </td>
+                              <td>
+                                {s.metrics.trend != null
+                                  ? `${pct(s.metrics.trend)}${s.metrics.trendAdjusted ? ' · защита' : ''}`
+                                  : '—'}
+                              </td>
                               <td>{s.metrics.salesPerDay.toFixed(2)}</td>
                             </tr>
                           ))}

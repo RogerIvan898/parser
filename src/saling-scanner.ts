@@ -65,6 +65,14 @@ export interface StoredDealMetrics {
   samples7?: number;
   samples30?: number | null;
   priceStability?: number | null;
+  median7?: number;
+  median3?: number | null;
+  samples3?: number | null;
+  trend?: number | null;
+  trendDirection?: 'down' | 'up' | 'flat' | 'unknown';
+  trendAdjusted?: boolean;
+  recentBelowBaseRatio?: number | null;
+  baseReferencePrice?: number;
 }
 
 export interface StoredScopeVerdict {
@@ -185,6 +193,19 @@ function num(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+function optNum(v: unknown): number | undefined {
+  if (v === undefined || v === null || v === '') return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function optNumOrNull(v: unknown): number | null | undefined {
+  if (v === undefined) return undefined;
+  if (v === null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 function metricsFromRaw(
   metrics: Record<string, unknown>,
   confidenceOverride?: string,
@@ -209,12 +230,21 @@ function metricsFromRaw(
           ? null
           : undefined
         : num(metrics.samples30),
-    priceStability:
-      metrics.priceStability === null || metrics.priceStability === undefined
-        ? metrics.priceStability === null
-          ? null
-          : undefined
-        : num(metrics.priceStability),
+    priceStability: optNumOrNull(metrics.priceStability),
+    median7: optNum(metrics.median7),
+    median3: optNumOrNull(metrics.median3),
+    samples3: optNumOrNull(metrics.samples3),
+    trend: optNumOrNull(metrics.trend),
+    trendDirection:
+      metrics.trendDirection === 'down' ||
+      metrics.trendDirection === 'up' ||
+      metrics.trendDirection === 'flat' ||
+      metrics.trendDirection === 'unknown'
+        ? metrics.trendDirection
+        : undefined,
+    trendAdjusted: metrics.trendAdjusted === true,
+    recentBelowBaseRatio: optNumOrNull(metrics.recentBelowBaseRatio),
+    baseReferencePrice: optNum(metrics.baseReferencePrice),
   };
 }
 
@@ -236,6 +266,14 @@ function metricsFromVerdict(
     samples7: m.samples7,
     samples30: m.samples30,
     priceStability: m.priceStability,
+    median7: m.median7,
+    median3: m.median3,
+    samples3: m.samples3,
+    trend: m.trend,
+    trendDirection: m.trendDirection,
+    trendAdjusted: m.trendAdjusted,
+    recentBelowBaseRatio: m.recentBelowBaseRatio,
+    baseReferencePrice: m.baseReferencePrice,
   };
 }
 
@@ -468,7 +506,11 @@ function formatScopeEval(s: ScopedLotEvaluation): string {
   const m = Math.round(s.verdict.metrics.netMargin * 100);
   const win = s.verdict.metrics.windowDays ?? 7;
   const c = s.verdict.metrics.confidence;
-  return `${s.scope}=${s.verdict.action}/${ev}(Δ${d}% M${m}% n=${s.verdict.metrics.samples} ${win}д ${c} n7=${n7})`;
+  const trend =
+    s.verdict.metrics.trendAdjusted && s.verdict.metrics.trend != null
+      ? ` t${Math.round(s.verdict.metrics.trend * 100)}%`
+      : '';
+  return `${s.scope}=${s.verdict.action}/${ev}(Δ${d}% M${m}% n=${s.verdict.metrics.samples} ${win}д ${c} n7=${n7}${trend})`;
 }
 
 const SALING_BUYS_CSV_HEADER =

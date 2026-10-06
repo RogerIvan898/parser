@@ -212,6 +212,7 @@ export function Evaluate() {
                   <th>Медиана</th>
                   <th>К медиане</th>
                   <th>Маржа</th>
+                  <th>3д / тренд</th>
                   <th>Уверенность</th>
                 </tr>
               </thead>
@@ -242,6 +243,14 @@ export function Evaluate() {
                       </td>
                       <td>
                         {(s.verdict.metrics.netMargin * 100).toFixed(1)}%
+                      </td>
+                      <td>
+                        {s.verdict.metrics.median3 != null
+                          ? `${s.verdict.metrics.median3.toFixed(2)}`
+                          : '—'}
+                        {s.verdict.metrics.trend != null
+                          ? ` (${(s.verdict.metrics.trend * 100).toFixed(0)}%${s.verdict.metrics.trendAdjusted ? ', защита' : ''})`
+                          : ''}
                       </td>
                       <td>{s.verdict.metrics.confidence}</td>
                     </tr>

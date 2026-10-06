@@ -60,6 +60,19 @@ export interface DealVerdict {
     samples7?: number;
     samples30?: number | null;
     priceStability?: number | null;
+    /** Медиана 7д того же среза, до подмены на свежую. */
+    median7?: number;
+    median3?: number | null;
+    samples3?: number | null;
+    /** (median3−median7)/median7. null — мало продаж за 3д. */
+    trend?: number | null;
+    trendDirection?: 'down' | 'up' | 'flat' | 'unknown';
+    /** true — решение считалось от медианы 3д, не от 7д/30д. */
+    trendAdjusted?: boolean;
+    /** Доля сделок за 3д строго ниже медианы 7д. */
+    recentBelowBaseRatio?: number | null;
+    /** Ориентир до защиты по тренду (медиана 7д или 30д). */
+    baseReferencePrice?: number;
   };
 }
 
@@ -228,6 +241,36 @@ function cutoffTs(days: number): number {
   return nowTs() - days * 86400;
 }
 
+function sliceAmountNanos(
+  collection: string,
+  model: string,
+  backdrop: string,
+  since: number,
+): number[] {
+  if (model && backdrop) {
+    return (
+      salesByModelBackdropStmt.all(collection, model, backdrop, since) as {
+        amount_nano: number;
+      }[]
+    ).map((r) => r.amount_nano);
+  }
+  if (model) {
+    return (
+      salesByModelStmt.all(collection, model, since) as { amount_nano: number }[]
+    ).map((r) => r.amount_nano);
+  }
+  if (backdrop) {
+    return (
+      salesByCollectionBackdropStmt.all(collection, backdrop, since) as {
+        amount_nano: number;
+      }[]
+    ).map((r) => r.amount_nano);
+  }
+  return (
+    salesByCollectionStmt.all(collection, since) as { amount_nano: number }[]
+  ).map((r) => r.amount_nano);
+}
+
 export function getModelPriceStats(
   collection: string,
   model: string,
@@ -331,6 +374,14 @@ export const PRICE_STABILITY_OK = 0.15;
 export const PRICE_STABILITY_MAX = 0.3;
 /** Extended buy требует запас сверх обычных порогов: 30д менее актуальны. */
 export const EXTENDED_BUY_EXTRA = 0.02;
+/** Свежее окно на том же срезе: детектор сдвига рынка, не замена 30д. */
+export const RECENT_WINDOW_DAYS = 3;
+/** Меньше — тренд неизвестен (2 продажи ≠ «рынок рухнул»). */
+export const MIN_SAMPLES_FOR_TREND = 5;
+/** (median3−median7)/median7 ≤ этого — для решения берём медиану 3д. */
+export const TREND_DOWN_THRESHOLD = -0.1;
+/** Доля продаж за 3д ниже медианы 7д, тоже включает защиту. */
+export const RECENT_BELOW_BASE_MIN = 0.75;
 
 /**
  * Уверенность от размера выборки того окна, по которому считаем цену.
@@ -701,6 +752,9 @@ type Confidence = StatsWithConfidence['confidence'];
  * Skip только когда выборка достаточна и по ней лот покупать не стоит.
  * Если за `days` (обычно 7) меньше 10 продаж, медиана 30д может стать ориентиром
  * (evidence=extended, confidence=low), пока медианы не разъехались больше чем на 30%.
+ * На любом срезе отдельно считаются 3 дня: если рынок просел (тренд ≤ −10%
+ * или ≥75% свежих сделок ниже медианы 7д, при ≥5 продажах за 3д),
+ * buy/watch/skip идут от медианы 3д, а не от устаревшей 7д/30д.
  */
 export function decideFromSales(
   collection: string,
@@ -762,12 +816,66 @@ export function decideFromSales(
     evidence = 'weak';
   }
 
-  const referencePrice = priced.median;
+  const stats3 =
+    days > RECENT_WINDOW_DAYS
+      ? getStatsExact(
+          collection,
+          modelTrimmed,
+          backdropTrimmed,
+          RECENT_WINDOW_DAYS,
+        )
+      : null;
+  const samples3 = stats3 ? stats3.samples : null;
+  const median7 = stats7.median;
+  const median3 = stats3 && stats3.samples > 0 ? stats3.median : null;
+  const recentNanos =
+    samples3 != null && samples3 > 0
+      ? sliceAmountNanos(
+          collection,
+          modelTrimmed,
+          backdropTrimmed,
+          cutoffTs(RECENT_WINDOW_DAYS),
+        )
+      : [];
+  let trend: number | null = null;
+  let trendDirection: 'down' | 'up' | 'flat' | 'unknown' = 'unknown';
+  let recentBelow: number | null = null;
+  if (recentNanos.length > 0 && median7 > 0) {
+    const below = recentNanos.filter((n) => nanoToTon(n) < median7).length;
+    recentBelow = below / recentNanos.length;
+  }
+  if (
+    samples3 != null &&
+    samples3 >= MIN_SAMPLES_FOR_TREND &&
+    median7 > 0 &&
+    median3 != null &&
+    median3 > 0
+  ) {
+    trend = (median3 - median7) / median7;
+    if (trend <= TREND_DOWN_THRESHOLD) trendDirection = 'down';
+    else if (trend >= -TREND_DOWN_THRESHOLD) trendDirection = 'up';
+    else trendDirection = 'flat';
+  }
+  const ratioDown =
+    samples3 != null &&
+    samples3 >= MIN_SAMPLES_FOR_TREND &&
+    recentBelow != null &&
+    recentBelow >= RECENT_BELOW_BASE_MIN;
+  const trendDown = trendDirection === 'down' || ratioDown;
+  if (trendDown) trendDirection = 'down';
+
+  const baseReferencePrice = priced.median;
+  const trendAdjusted = Boolean(trendDown && median3 != null && median3 > 0);
+  const referencePrice = trendAdjusted ? median3! : baseReferencePrice;
+  const decisionDays = trendAdjusted ? RECENT_WINDOW_DAYS : windowDays;
   const discount = discountVsMedian(listingPrice, referencePrice);
   const margin = netMargin(listingPrice, referencePrice, feeRate);
   const salesPerDay = windowDays > 0 ? priced.samples / windowDays : 0;
   const confidence: Confidence =
     evidence === 'extended' ? 'low' : confidenceFromSamples(priced.samples);
+  const trendNote = trendAdjusted
+    ? `; свежий рынок ${RECENT_WINDOW_DAYS}д ${median3!.toFixed(2)} TON vs 7д ${median7.toFixed(2)} (${trend != null ? `${Math.round(trend * 100)}%` : 'доля ниже базы'}${recentBelow != null ? `, ниже 7д ${Math.round(recentBelow * 100)}%` : ''})`
+    : '';
 
   const metrics: DealVerdict['metrics'] = {
     listingPrice,
@@ -779,10 +887,18 @@ export function decideFromSales(
     confidence,
     samples: priced.samples,
     salesPerDay,
-    windowDays,
+    windowDays: decisionDays,
     samples7: stats7.samples,
     samples30,
     priceStability: stability,
+    median7,
+    median3,
+    samples3,
+    trend,
+    trendDirection,
+    trendAdjusted,
+    recentBelowBaseRatio: recentBelow,
+    baseReferencePrice,
   };
 
   if (evidence === 'insufficient' || evidence === 'weak') {
@@ -802,19 +918,23 @@ export function decideFromSales(
 
   const pct = Math.round(Math.abs(discount) * 100);
   const marginPct = Math.round(margin * 100);
-  const windowLabel =
-    evidence === 'extended' ? `${slice}, ${windowDays}д` : slice;
+  const windowLabel = trendAdjusted
+    ? `${slice}, ${RECENT_WINDOW_DAYS}д`
+    : evidence === 'extended'
+      ? `${slice}, ${windowDays}д`
+      : slice;
   const { buyMinDiscount, buyMinMargin, watchMinDiscount } =
     getSalesVerdictThresholds();
-  const iqr = iqrRatioOf(priced);
+  const iqr = iqrRatioOf(trendAdjusted && stats3 ? stats3 : priced);
   const regularBuy =
     discount >= buyMinDiscount && margin >= buyMinMargin;
   const extendedBuy =
     discount >= buyMinDiscount + EXTENDED_BUY_EXTRA &&
     margin >= buyMinMargin + EXTENDED_BUY_EXTRA;
-  const priceOk = evidence === 'extended' ? extendedBuy : regularBuy;
+  const priceOk =
+    evidence === 'extended' && !trendAdjusted ? extendedBuy : regularBuy;
   const extendedShort =
-    evidence === 'extended' && regularBuy && !extendedBuy;
+    evidence === 'extended' && !trendAdjusted && regularBuy && !extendedBuy;
 
   if (priceOk && iqr !== null && iqr > 0.5) {
     return {
@@ -841,7 +961,7 @@ export function decideFromSales(
       action: 'buy',
       evidence,
       scope: stats7.scope,
-      reason: `дешевле медианы (${windowLabel}) на ${pct}%, после комиссии ${feePct}% маржа ~${marginPct}%${stabilityNote}`,
+      reason: `дешевле медианы (${windowLabel}) на ${pct}%, после комиссии ${feePct}% маржа ~${marginPct}%${stabilityNote}${trendNote}`,
       metrics,
     };
   }
@@ -854,7 +974,7 @@ export function decideFromSales(
       action: 'watch',
       evidence,
       scope: stats7.scope,
-      reason: `дисконт к медиане (${windowLabel}) ${pct}%, маржа после ${feePct}% — ${marginPct}%${stabilityNote}${short}`,
+      reason: `дисконт к медиане (${windowLabel}) ${pct}%, маржа после ${feePct}% — ${marginPct}%${stabilityNote}${trendNote}${short}`,
       metrics,
     };
   }
@@ -863,7 +983,7 @@ export function decideFromSales(
       action: 'skip',
       evidence,
       scope: stats7.scope,
-      reason: `дороже медианы продаж (${windowLabel}) на ${pct}%${stabilityNote}`,
+      reason: `дороже медианы продаж (${windowLabel}) на ${pct}%${stabilityNote}${trendNote}`,
       metrics,
     };
   }
@@ -872,7 +992,7 @@ export function decideFromSales(
       action: 'skip',
       evidence,
       scope: stats7.scope,
-      reason: `после комиссии ${feePct}% перепродажа в минус (маржа ${marginPct}%)${stabilityNote}`,
+      reason: `после комиссии ${feePct}% перепродажа в минус (маржа ${marginPct}%)${stabilityNote}${trendNote}`,
       metrics,
     };
   }
@@ -880,7 +1000,7 @@ export function decideFromSales(
     action: 'skip',
     evidence,
     scope: stats7.scope,
-    reason: `цена около медианы продаж (${windowLabel})${stabilityNote}`,
+    reason: `цена около медианы продаж (${windowLabel})${stabilityNote}${trendNote}`,
     metrics,
   };
 }
