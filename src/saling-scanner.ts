@@ -514,7 +514,7 @@ function formatScopeEval(s: ScopedLotEvaluation): string {
 }
 
 const SALING_BUYS_CSV_HEADER =
-  'price_ton,collection,model,backdrop,listing_id\n';
+  'price_ton,collection,model,backdrop,listing_id,confidence\n';
 
 function csvField(value: string): string {
   if (/[",\n\r]/.test(value)) {
@@ -527,7 +527,10 @@ function appendBuyCsvLog(
   gift: Gift,
   collection: string,
   priceTon: number,
+  confidence: string,
 ): void {
+  if (confidence !== 'medium' && confidence !== 'high') return;
+
   const model = gift.modelName || gift.modelTitle || '';
   const backdrop = gift.backdropName?.trim() ?? '';
   const listingId = gift.id || gift.giftIdString;
@@ -537,6 +540,7 @@ function appendBuyCsvLog(
     csvField(model),
     csvField(backdrop),
     csvField(listingId),
+    csvField(confidence),
   ].join(',');
   mkdirSync(DATA_DIR, { recursive: true });
   if (!existsSync(SALING_BUYS_CSV)) {
@@ -665,7 +669,12 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
       buyLots++;
       if (upsertAnalysisDeal(profitStore, record)) {
         profitAdded++;
-        appendBuyCsvLog(gift, collection, listingTon);
+        appendBuyCsvLog(
+          gift,
+          collection,
+          listingTon,
+          record.primary.confidence,
+        );
       }
     } else if (action === 'watch') {
       watchLots++;
