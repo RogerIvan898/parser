@@ -79,14 +79,36 @@ export interface DealVerdict {
     trend?: number | null;
     trendDirection?: 'down' | 'up' | 'flat' | 'unknown';
     trendAdjusted?: boolean;
+    trendStatus?: 'bullish' | 'bearish' | 'neutral';
+    bullishDiscountApplied?: boolean;
+    rawMedian3?: number | null;
+    trendView?: {
+      status: 'bullish' | 'bearish' | 'neutral';
+      median7: number;
+      median3: number | null;
+      referenceUsed: number;
+    } | null;
     recentBelowBaseRatio?: number | null;
     baseReferencePrice?: number;
     backdropMedian?: number | null;
     backdropSamples7?: number | null;
     backdropSamples30?: number | null;
     backdropRatio?: number | null;
+    backdropRatioClamped?: number | null;
+    backdropTier?: 'low' | 'mid' | 'high' | null;
+    backdropShiftFactor?: number | null;
     backdropAdjustment?: number | null;
     backdropAdjustmentApplied?: boolean;
+    orderBookMetrics?: {
+      activeFloor: number;
+      cheaperListingsCount: number;
+      listingsBelowTarget: number;
+      liquidityOverhangDays: number | null;
+      targetSellPrice: number;
+      activeCount: number;
+      referenceCapped: boolean;
+      nextAskPrice: number | null;
+    } | null;
   };
 }
 
@@ -193,6 +215,9 @@ export interface SalingDealMetricsFull {
   backdropSamples7?: number | null;
   backdropSamples30?: number | null;
   backdropRatio?: number | null;
+  backdropRatioClamped?: number | null;
+  backdropTier?: 'low' | 'mid' | 'high' | null;
+  backdropShiftFactor?: number | null;
   backdropAdjustment?: number | null;
   backdropAdjustmentApplied?: boolean;
 }

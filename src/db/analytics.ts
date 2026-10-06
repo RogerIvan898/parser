@@ -1,6 +1,9 @@
 import {
+  getBackdropAdjustmentConfig,
+  getBullishMarginPremium,
   getSalesVerdictThresholds,
   isBackdropEnabledForAnalysis,
+  type BackdropAdjustmentConfig,
 } from '../parse-config.js';
 import { NANO } from '../types.js';
 import { db } from './index.js';
@@ -67,8 +70,21 @@ export interface DealVerdict {
     /** (median3−median7)/median7. null — мало продаж за 3д. */
     trend?: number | null;
     trendDirection?: 'down' | 'up' | 'flat' | 'unknown';
-    /** true — решение считалось от медианы 3д, не от 7д/30д. */
+    /**
+     * true только при медвежьем сдвиге (reference = median3).
+     * Бычий рынок сюда не входит: иначе узкий skip отменял бы широкий buy.
+     */
     trendAdjusted?: boolean;
+    trendStatus?: 'bullish' | 'bearish' | 'neutral';
+    /** true — ориентир поднят по формуле median7 + (median3−median7)×0.7. */
+    bullishDiscountApplied?: boolean;
+    rawMedian3?: number | null;
+    trendView?: {
+      status: 'bullish' | 'bearish' | 'neutral';
+      median7: number;
+      median3: number | null;
+      referenceUsed: number;
+    } | null;
     /** Доля сделок за 3д строго ниже медианы 7д. */
     recentBelowBaseRatio?: number | null;
     /** Ориентир до защиты по тренду (медиана 7д или 30д). */
@@ -79,10 +95,39 @@ export interface DealVerdict {
     backdropSamples30?: number | null;
     /** backdropMedian / ориентир модели. */
     backdropRatio?: number | null;
+    /** ratio после soft-clamp выбранного коридора. */
+    backdropRatioClamped?: number | null;
+    backdropTier?: 'low' | 'mid' | 'high' | null;
+    backdropShiftFactor?: number | null;
     /** Фактический сдвиг ориентира: 0.95 → −0.05. null — цену не двигали. */
     backdropAdjustment?: number | null;
     backdropAdjustmentApplied?: boolean;
+    /** Активный стакан этого среза. null — стакан не передавали. */
+    orderBookMetrics?: OrderBookMetrics | null;
   };
+}
+
+/** Активное объявление. Цена в TON. Оцениваемый лот в массив не класть. */
+export interface ActiveListing {
+  price: number;
+  collection: string;
+  model?: string | null;
+  backdrop?: string | null;
+  createdAt?: string | number | null;
+  id?: string | null;
+}
+
+export interface OrderBookMetrics {
+  activeFloor: number;
+  cheaperListingsCount: number;
+  listingsBelowTarget: number;
+  /** null — продаж в день нет, очередь не переводится в дни. */
+  liquidityOverhangDays: number | null;
+  targetSellPrice: number;
+  activeCount: number;
+  referenceCapped: boolean;
+  /** Ближайший чужой листинг строго выше текущей цены. */
+  nextAskPrice: number | null;
 }
 
 function nanoToTon(nano: number): number {
@@ -391,21 +436,28 @@ export const MIN_SAMPLES_FOR_TREND = 5;
 export const TREND_DOWN_THRESHOLD = -0.1;
 /** Доля продаж за 3д ниже медианы 7д, тоже включает защиту. */
 export const RECENT_BELOW_BASE_MIN = 0.75;
+/** Доля продаж за 3д строго выше медианы 7д: вместе с ростом ≥10% включает бычий ориентир. */
+export const RECENT_ABOVE_BASE_MIN = 0.75;
+/** Какую долю роста 3д к 7д переносим в ориентир. Остальное — запас на откат. */
+export const BULLISH_HAIRCUT = 0.7;
 /**
  * Black / Onyx Black: если коллекция+фон ещё не набрала 10 продаж,
  * модель+фон может задать цену уже от 3 продаж.
  */
 export const PREMIUM_MODEL_BACKDROP_MIN = 3;
 /**
- * Обычный фон (не Black / Onyx Black):
- * < 3 продаж — игнор, 3–4 только справка, 5–9 осторожный сдвиг медианы модели,
- * ≥ 10 — model+backdrop может быть основным ориентиром.
+ * Обычный фон: коридор и доля сдвига задаёт объём 30д/7д
+ * (getBackdropAdjustmentConfig), не фиксированные 0.80–1.20.
+ * Полный сдвиг (high) и ≥10 продаж за 7д — model+backdrop может быть primary.
  */
 export const BACKDROP_SUPPORT_MIN = 5;
-/** Доля отклонения ratio при 5–9 продажах. Полная замена медианы модели — только при ≥ 10. */
-export const BACKDROP_PARTIAL_WEIGHT = 0.5;
-export const BACKDROP_RATIO_MIN = 0.8;
-export const BACKDROP_RATIO_MAX = 1.2;
+/** Лот не ниже флора, если он в пределах 0.5% от минимального листинга. */
+export const ORDER_BOOK_FLOOR_SPREAD = 0.005;
+/** Историческая медиана не выше текущего флора больше чем на 3%. */
+export const ORDER_BOOK_FLOOR_CAP = 1.03;
+export const ORDER_BOOK_WALL_LISTINGS = 3;
+export const ORDER_BOOK_OVERHANG_WATCH_DAYS = 2;
+export const ORDER_BOOK_OVERHANG_SKIP_DAYS = 5;
 
 /**
  * Уверенность от размера выборки того окна, по которому считаем цену.
@@ -770,6 +822,146 @@ function priceStabilityRatio(
 
 type Confidence = StatsWithConfidence['confidence'];
 
+function listingMatchesScope(
+  listing: ActiveListing,
+  scope: StatsWithConfidence['scope'],
+  collection: string,
+  model: string,
+  backdrop: string,
+): boolean {
+  if (listing.collection.trim() !== collection) return false;
+  if (scope === 'collection') return true;
+  if (scope === 'model') return (listing.model?.trim() ?? '') === model;
+  if (scope === 'collection+backdrop') {
+    return (listing.backdrop?.trim() ?? '') === backdrop;
+  }
+  return (
+    (listing.model?.trim() ?? '') === model &&
+    (listing.backdrop?.trim() ?? '') === backdrop
+  );
+}
+
+function listingsForScope(
+  listings: ActiveListing[] | null | undefined,
+  scope: StatsWithConfidence['scope'],
+  collection: string,
+  model: string,
+  backdrop: string,
+): ActiveListing[] | null {
+  if (!listings) return null;
+  return listings.filter((row) =>
+    listingMatchesScope(row, scope, collection, model, backdrop),
+  );
+}
+
+function buildOrderBookMetrics(
+  asks: ActiveListing[] | null,
+  listingPrice: number,
+  salesReference: number,
+  salesPerDay: number,
+  feeRate: number,
+  requiredMargin: number,
+): OrderBookMetrics | null {
+  if (!asks) return null;
+  const prices = asks
+    .map((row) => row.price)
+    .filter((price) => Number.isFinite(price) && price > 0)
+    .sort((a, b) => a - b);
+  const activeFloor = prices[0] ?? 0;
+  const cheaperListingsCount = prices.filter((price) => price <= listingPrice).length;
+  const effectiveReference =
+    activeFloor > 0
+      ? Math.min(salesReference, activeFloor * ORDER_BOOK_FLOOR_CAP)
+      : salesReference;
+  const grossFromMargin =
+    feeRate < 1 ? (listingPrice * (1 + requiredMargin)) / (1 - feeRate) : listingPrice;
+  const targetSellPrice =
+    effectiveReference > 0
+      ? Math.min(grossFromMargin, effectiveReference)
+      : grossFromMargin;
+  const listingsBelowTarget = prices.filter((price) => price < targetSellPrice).length;
+  const liquidityOverhangDays =
+    salesPerDay > 0 ? listingsBelowTarget / salesPerDay : null;
+  const nextAskPrice =
+    prices.find((price) => price > listingPrice * (1 + ORDER_BOOK_FLOOR_SPREAD)) ??
+    null;
+  return {
+    activeFloor,
+    cheaperListingsCount,
+    listingsBelowTarget,
+    liquidityOverhangDays,
+    targetSellPrice,
+    activeCount: prices.length,
+    referenceCapped:
+      activeFloor > 0 &&
+      salesReference > 0 &&
+      effectiveReference < salesReference - 1e-9,
+    nextAskPrice,
+  };
+}
+
+function capReferenceByFloor(reference: number, book: OrderBookMetrics | null): number {
+  if (!book || book.activeFloor <= 0 || reference <= 0) return reference;
+  return Math.min(reference, book.activeFloor * ORDER_BOOK_FLOOR_CAP);
+}
+
+/**
+ * 3.1–3.2. Стакан не передан или пуст — вердикт не трогаем.
+ * Дешевле флора больше чем на 0.5% — правило 3.1 не срабатывает.
+ */
+function applyOrderBookVeto(
+  action: DealVerdict['action'],
+  reason: string,
+  listingPrice: number,
+  feeRate: number,
+  book: OrderBookMetrics | null,
+): { action: DealVerdict['action']; reason: string } {
+  if (!book || book.activeCount === 0 || book.activeFloor <= 0) {
+    return { action, reason };
+  }
+  if (action !== 'buy' && action !== 'watch') return { action, reason };
+
+  const notBelowFloor =
+    listingPrice >= book.activeFloor * (1 - ORDER_BOOK_FLOOR_SPREAD);
+  const someoneCheaper =
+    book.activeFloor < listingPrice * (1 - ORDER_BOOK_FLOOR_SPREAD);
+  if (someoneCheaper) {
+    return {
+      action: 'skip',
+      reason: `${reason}; cheaper_active_listings_exist`,
+    };
+  }
+  if (notBelowFloor) {
+    if (action !== 'buy') return { action, reason };
+    const next = book.nextAskPrice;
+    const { buyMinMargin } = getSalesVerdictThresholds();
+    const marginToNext =
+      next != null && next > listingPrice ? netMargin(listingPrice, next, feeRate) : -1;
+    if (marginToNext >= buyMinMargin) {
+      return {
+        action: 'watch',
+        reason: `${reason}; listing_at_active_floor`,
+      };
+    }
+    return {
+      action: 'skip',
+      reason: `${reason}; cheaper_active_listings_exist`,
+    };
+  }
+
+  if (action === 'buy' && book.listingsBelowTarget > ORDER_BOOK_WALL_LISTINGS) {
+    const overhang = book.liquidityOverhangDays;
+    const deep = overhang == null || overhang > ORDER_BOOK_OVERHANG_SKIP_DAYS;
+    if (deep || (overhang != null && overhang > ORDER_BOOK_OVERHANG_WATCH_DAYS)) {
+      return {
+        action: deep ? 'skip' : 'watch',
+        reason: `${reason}; sell_wall_liquidity_block`,
+      };
+    }
+  }
+  return { action, reason };
+}
+
 /**
  * Вердикт одного среза.
  * Мало продаж — insufficient/weak, не skip: срез ничего не доказал.
@@ -787,6 +979,7 @@ export function decideFromSales(
   listingPrice: number,
   days = 7,
   feeRate = 0.05,
+  activeListings?: ActiveListing[] | null,
 ): DealVerdict & { scope: StatsWithConfidence['scope'] } {
   const modelTrimmed = model?.trim() ?? '';
   const backdropTrimmed = backdrop?.trim() ?? '';
@@ -864,9 +1057,11 @@ export function decideFromSales(
   let trend: number | null = null;
   let trendDirection: 'down' | 'up' | 'flat' | 'unknown' = 'unknown';
   let recentBelow: number | null = null;
+  let recentAbove: number | null = null;
   if (recentNanos.length > 0 && median7 > 0) {
-    const below = recentNanos.filter((n) => nanoToTon(n) < median7).length;
-    recentBelow = below / recentNanos.length;
+    const tons = recentNanos.map(nanoToTon);
+    recentBelow = tons.filter((n) => n < median7).length / tons.length;
+    recentAbove = tons.filter((n) => n > median7).length / tons.length;
   }
   if (
     samples3 != null &&
@@ -889,17 +1084,56 @@ export function decideFromSales(
   if (trendDown) trendDirection = 'down';
 
   const baseReferencePrice = priced.median;
-  const trendAdjusted = Boolean(trendDown && median3 != null && median3 > 0);
-  const referencePrice = trendAdjusted ? median3! : baseReferencePrice;
-  const decisionDays = trendAdjusted ? RECENT_WINDOW_DAYS : windowDays;
+  const bullishUp =
+    samples3 != null &&
+    samples3 >= MIN_SAMPLES_FOR_TREND &&
+    trend != null &&
+    trend >= -TREND_DOWN_THRESHOLD &&
+    recentAbove != null &&
+    recentAbove >= RECENT_ABOVE_BASE_MIN &&
+    median3 != null &&
+    median3 > 0 &&
+    median7 > 0;
+  let trendStatus: 'bullish' | 'bearish' | 'neutral' = 'neutral';
+  let salesReference = baseReferencePrice;
+  let decisionDays = windowDays;
+  if (trendDown && median3 != null && median3 > 0) {
+    trendStatus = 'bearish';
+    salesReference = median3;
+    decisionDays = RECENT_WINDOW_DAYS;
+  } else if (bullishUp && median3 != null) {
+    trendStatus = 'bullish';
+    salesReference = median7 + (median3 - median7) * BULLISH_HAIRCUT;
+    decisionDays = RECENT_WINDOW_DAYS;
+  }
+  const trendAdjusted = trendStatus === 'bearish';
+  const bullishDiscountApplied = trendStatus === 'bullish';
+  const salesPerDay = windowDays > 0 ? priced.samples / windowDays : 0;
+  const requiredMargin = getSalesVerdictThresholds().buyMinMargin;
+  const orderBook = buildOrderBookMetrics(
+    listingsForScope(
+      activeListings,
+      stats7.scope,
+      collection,
+      modelTrimmed,
+      backdropTrimmed,
+    ),
+    listingPrice,
+    salesReference,
+    salesPerDay,
+    feeRate,
+    requiredMargin,
+  );
+  const referencePrice = capReferenceByFloor(salesReference, orderBook);
   const discount = discountVsMedian(listingPrice, referencePrice);
   const margin = netMargin(listingPrice, referencePrice, feeRate);
-  const salesPerDay = windowDays > 0 ? priced.samples / windowDays : 0;
   const confidence: Confidence =
     evidence === 'extended' ? 'low' : confidenceFromSamples(priced.samples);
   const trendNote = trendAdjusted
     ? `; свежий рынок ${RECENT_WINDOW_DAYS}д ${median3!.toFixed(2)} TON vs 7д ${median7.toFixed(2)} (${trend != null ? `${Math.round(trend * 100)}%` : 'доля ниже базы'}${recentBelow != null ? `, ниже 7д ${Math.round(recentBelow * 100)}%` : ''})`
-    : '';
+    : bullishDiscountApplied
+      ? `; рост ${RECENT_WINDOW_DAYS}д ${median3!.toFixed(2)} TON vs 7д ${median7.toFixed(2)}, ориентир ${salesReference.toFixed(2)} TON (haircut ${Math.round(BULLISH_HAIRCUT * 100)}%)`
+      : '';
 
   const metrics: DealVerdict['metrics'] = {
     listingPrice,
@@ -921,8 +1155,40 @@ export function decideFromSales(
     trend,
     trendDirection,
     trendAdjusted,
+    trendStatus,
+    bullishDiscountApplied,
+    rawMedian3: median3,
+    trendView: {
+      status: trendStatus,
+      median7,
+      median3,
+      referenceUsed: referencePrice,
+    },
     recentBelowBaseRatio: recentBelow,
     baseReferencePrice,
+    orderBookMetrics: orderBook,
+  };
+
+  const withBook = (
+    action: DealVerdict['action'],
+    evidenceOut: EvidenceTier,
+    reason: string,
+    metricsOut: DealVerdict['metrics'] = metrics,
+  ): DealVerdict & { scope: StatsWithConfidence['scope'] } => {
+    const veto = applyOrderBookVeto(
+      action,
+      reason,
+      listingPrice,
+      feeRate,
+      metricsOut.orderBookMetrics ?? orderBook,
+    );
+    return {
+      action: veto.action,
+      evidence: evidenceOut,
+      scope: stats7.scope,
+      reason: veto.reason,
+      metrics: metricsOut,
+    };
   };
 
   if (evidence === 'insufficient' || evidence === 'weak') {
@@ -949,16 +1215,17 @@ export function decideFromSales(
       : slice;
   const { buyMinDiscount, buyMinMargin, watchMinDiscount } =
     getSalesVerdictThresholds();
+  const marginNeed =
+    buyMinMargin + (bullishDiscountApplied ? getBullishMarginPremium() : 0);
   const iqr = iqrRatioOf(trendAdjusted && stats3 ? stats3 : priced);
-  const regularBuy =
-    discount >= buyMinDiscount && margin >= buyMinMargin;
+  const regularBuy = discount >= buyMinDiscount && margin >= marginNeed;
   const extendedBuy =
     discount >= buyMinDiscount + EXTENDED_BUY_EXTRA &&
-    margin >= buyMinMargin + EXTENDED_BUY_EXTRA;
-  const priceOk =
-    evidence === 'extended' && !trendAdjusted ? extendedBuy : regularBuy;
+    margin >= marginNeed + EXTENDED_BUY_EXTRA;
+  const freshMove = trendAdjusted || bullishDiscountApplied;
+  const priceOk = evidence === 'extended' && !freshMove ? extendedBuy : regularBuy;
   const extendedShort =
-    evidence === 'extended' && !trendAdjusted && regularBuy && !extendedBuy;
+    evidence === 'extended' && !freshMove && regularBuy && !extendedBuy;
 
   if (priceOk && iqr !== null && iqr > 0.5) {
     return {
@@ -981,26 +1248,22 @@ export function decideFromSales(
         metrics,
       };
     }
-    return {
-      action: 'buy',
+    return withBook(
+      'buy',
       evidence,
-      scope: stats7.scope,
-      reason: `дешевле медианы (${windowLabel}) на ${pct}%, после комиссии ${feePct}% маржа ~${marginPct}%${stabilityNote}${trendNote}`,
-      metrics,
-    };
+      `дешевле медианы (${windowLabel}) на ${pct}%, после комиссии ${feePct}% маржа ~${marginPct}%${stabilityNote}${trendNote}`,
+    );
   }
   if (discount >= watchMinDiscount && margin > 0) {
     const short =
       extendedShort
         ? `; для buy по 30д нужен запас +${Math.round(EXTENDED_BUY_EXTRA * 100)} п.п. к порогам`
         : '';
-    return {
-      action: 'watch',
+    return withBook(
+      'watch',
       evidence,
-      scope: stats7.scope,
-      reason: `дисконт к медиане (${windowLabel}) ${pct}%, маржа после ${feePct}% — ${marginPct}%${stabilityNote}${trendNote}${short}`,
-      metrics,
-    };
+      `дисконт к медиане (${windowLabel}) ${pct}%, маржа после ${feePct}% — ${marginPct}%${stabilityNote}${trendNote}${short}`,
+    );
   }
   if (discount < -0.05) {
     return {
@@ -1042,6 +1305,9 @@ type BackdropDiag = Pick<
   | 'backdropSamples7'
   | 'backdropSamples30'
   | 'backdropRatio'
+  | 'backdropRatioClamped'
+  | 'backdropTier'
+  | 'backdropShiftFactor'
   | 'backdropAdjustment'
   | 'backdropAdjustmentApplied'
 >;
@@ -1080,14 +1346,23 @@ function repriceToReference(
   }
 
   const listingPrice = s.verdict.metrics.listingPrice;
-  const discount = discountVsMedian(listingPrice, referencePrice);
-  const margin = netMargin(listingPrice, referencePrice, feeRate);
+  const book = s.verdict.metrics.orderBookMetrics ?? null;
+  const cappedReference = capReferenceByFloor(referencePrice, book);
+  const discount = discountVsMedian(listingPrice, cappedReference);
+  const margin = netMargin(listingPrice, cappedReference, feeRate);
   const metrics: DealVerdict['metrics'] = {
     ...s.verdict.metrics,
     ...diag,
-    referencePrice,
+    referencePrice: cappedReference,
     discountVsMedian: discount,
     netMargin: margin,
+    orderBookMetrics: book
+      ? {
+          ...book,
+          referenceCapped:
+            book.referenceCapped || cappedReference < referencePrice - 1e-9,
+        }
+      : book,
   };
   const draft: ScopedLotEvaluation = {
     ...s,
@@ -1111,42 +1386,98 @@ function repriceToReference(
     : '';
   const adjNote = `; фон ${adjPct >= 0 ? '+' : ''}${adjPct}% (${diag.backdropSamples7} продаж model+backdrop)${trendNote}`;
 
+  let next = draft;
+  let nextAction = action;
+  let nextReason = `цена около медианы с учётом фона${adjNote}`;
   if (action === 'buy') {
     const illiquid = liquidityBlockReason(collection, s.model?.trim() ?? '', days);
     if (illiquid) {
-      return withAction({ ...draft, verdict: { ...draft.verdict, metrics } }, 'skip', illiquid);
+      nextAction = 'skip';
+      nextReason = illiquid;
+    } else {
+      nextReason = `дешевле медианы с учётом фона на ${pct}%, после комиссии ${feePct}% маржа ~${marginPct}%${adjNote}`;
     }
-    return withAction(
-      draft,
-      'buy',
-      `дешевле медианы с учётом фона на ${pct}%, после комиссии ${feePct}% маржа ~${marginPct}%${adjNote}`,
-    );
+  } else if (action === 'watch') {
+    nextReason = `дисконт к медиане с учётом фона ${pct}%, маржа после ${feePct}% — ${marginPct}%${adjNote}`;
+  } else if (discount < -0.05) {
+    nextReason = `дороже медианы с учётом фона на ${pct}%${adjNote}`;
+  } else if (margin < 0) {
+    nextReason = `после комиссии ${feePct}% перепродажа в минус (маржа ${marginPct}%)${adjNote}`;
   }
-  if (action === 'watch') {
-    return withAction(
-      draft,
-      'watch',
-      `дисконт к медиане с учётом фона ${pct}%, маржа после ${feePct}% — ${marginPct}%${adjNote}`,
-    );
+  next = withAction(draft, nextAction, nextReason);
+  const veto = applyOrderBookVeto(
+    next.verdict.action,
+    next.verdict.reason,
+    listingPrice,
+    feeRate,
+    next.verdict.metrics.orderBookMetrics ?? null,
+  );
+  if (veto.action === next.verdict.action && veto.reason === next.verdict.reason) {
+    return next;
   }
-  if (discount < -0.05) {
-    return withAction(draft, 'skip', `дороже медианы с учётом фона на ${pct}%${adjNote}`);
+  if (veto.action !== 'buy' && veto.action !== 'watch' && veto.action !== 'skip') {
+    return next;
   }
-  if (margin < 0) {
-    return withAction(
-      draft,
-      'skip',
-      `после комиссии ${feePct}% перепродажа в минус (маржа ${marginPct}%)${adjNote}`,
-    );
+  return withAction(next, veto.action, veto.reason);
+}
+
+/**
+ * За границей коридора ratio не обрезается ступенькой, а затухает логарифмом.
+ * Выше max: max + ln(1 + (raw − max)). Ниже min: min − ln(1 + (min − raw)).
+ */
+export function softClampRatio(raw: number, minBound: number, maxBound: number): number {
+  if (raw > maxBound) return maxBound + Math.log(1 + (raw - maxBound));
+  if (raw < minBound) return minBound - Math.log(1 + (minBound - raw));
+  return raw;
+}
+
+export interface BackdropTierChoice {
+  id: 'low' | 'mid' | 'high';
+  min: number;
+  max: number;
+  shiftFactor: number;
+}
+
+/**
+ * High: N30 и N7 дотягивают до high.
+ * Low: N30 не выше low.maxSales30 или N7 ниже mid.minSales7.
+ * Иначе mid, включая зазор «N30 уже high, но N7 ещё между mid и high».
+ */
+export function selectBackdropTier(
+  samples7: number,
+  samples30: number,
+  cfg: BackdropAdjustmentConfig = getBackdropAdjustmentConfig(),
+): BackdropTierChoice {
+  const { lowVolume: low, midVolume: mid, highVolume: high } = cfg;
+  if (samples30 >= high.minSales30 && samples7 >= high.minSales7) {
+    return {
+      id: 'high',
+      min: high.range[0],
+      max: high.range[1],
+      shiftFactor: high.shiftFactor,
+    };
   }
-  return withAction(draft, 'skip', `цена около медианы с учётом фона${adjNote}`);
+  const thin = samples30 <= low.maxSales30 || samples7 < mid.minSales7;
+  if (!thin && samples7 >= mid.minSales7) {
+    return {
+      id: 'mid',
+      min: mid.range[0],
+      max: mid.range[1],
+      shiftFactor: mid.shiftFactor,
+    };
+  }
+  return {
+    id: 'low',
+    min: low.range[0],
+    max: low.range[1],
+    shiftFactor: low.shiftFactor,
+  };
 }
 
 /**
  * Обычный фон: ratio = ориентир model+backdrop / ориентир модели (оба уже с 3д-трендом).
- * ≥10 — полный сдвиг, ограниченный 0.80–1.20, и этот срез может стать primary.
- * 5–9 — половина отклонения на медиану модели.
- * 3–4 — только диагностика. <3 — срез не используем.
+ * Коридор и доля сдвига зависят от продаж 30д и 7д. За границей коридора — soft clamp.
+ * Полный сдвиг и ≥10 продаж за 7д — model+backdrop может стать primary.
  * Black / Onyx Black не трогаем.
  */
 function applyOrdinaryBackdropAdjustment(
@@ -1161,36 +1492,46 @@ function applyOrdinaryBackdropAdjustment(
   if (isBackdropEnabledForAnalysis(mb.backdrop)) return scopes;
 
   const n7 = samples7of(mb);
-  if (n7 < PREMIUM_MODEL_BACKDROP_MIN) return scopes;
-
   const modelAnchor = modelSlice.verdict.metrics.referencePrice;
   const backdropPrice = mb.verdict.metrics.referencePrice;
   const ratio =
     modelAnchor > 0 && backdropPrice > 0 ? backdropPrice / modelAnchor : null;
+  if (ratio == null || n7 < 1) return scopes;
 
-  let weight = 0;
-  if (n7 >= MIN_SAMPLES_TO_EVALUATE && usableForPrimary(mb)) weight = 1;
-  else if (n7 >= BACKDROP_SUPPORT_MIN) weight = BACKDROP_PARTIAL_WEIGHT;
-
-  let adjustment: number | null = null;
-  let applied = false;
-  let nextModel = modelSlice;
-  let nextMb = mb;
-  const repriceTarget = weight === 1 ? mb : modelSlice;
+  const n30 =
+    mb.verdict.metrics.samples30 ??
+    getStatsExact(
+      collection,
+      mb.model,
+      mb.backdrop,
+      EXTENDED_WINDOW_DAYS,
+    ).samples;
+  const tier = selectBackdropTier(n7, n30);
+  const clamped = softClampRatio(ratio, tier.min, tier.max);
+  const shift = tier.shiftFactor;
+  const factor = 1 + shift * (clamped - 1);
+  const adjustment = factor - 1;
+  const fullLead =
+    shift >= 1 && n7 >= MIN_SAMPLES_TO_EVALUATE && usableForPrimary(mb);
+  const repriceTarget = fullLead ? mb : modelSlice;
   const canReprice =
-    weight > 0 &&
+    shift > 0 &&
     repriceTarget.verdict.evidence !== 'insufficient' &&
     repriceTarget.verdict.evidence !== 'weak' &&
     !repriceTarget.verdict.reason.includes('медиана ненадёжна');
+  const applied = canReprice && Math.abs(adjustment) > 1e-9;
+  const diag = backdropDiag(mb, ratio, adjustment, applied, {
+    samples30: n30,
+    clamped,
+    tier: tier.id,
+    shiftFactor: shift,
+  });
 
-  if (canReprice && ratio != null) {
-    const clamped = Math.min(BACKDROP_RATIO_MAX, Math.max(BACKDROP_RATIO_MIN, ratio));
-    const factor = 1 + weight * (clamped - 1);
-    adjustment = factor - 1;
-    applied = true;
-    const diag = backdropDiag(mb, ratio, adjustment, true);
+  let nextModel = modelSlice;
+  let nextMb = mb;
+  if (canReprice) {
     const newRef = modelAnchor * factor;
-    if (weight === 1) {
+    if (fullLead) {
       nextMb = repriceToReference(mb, newRef, feeRate, collection, days, diag);
       nextModel = withBackdropDiag(modelSlice, diag);
     } else {
@@ -1205,7 +1546,6 @@ function applyOrdinaryBackdropAdjustment(
       nextMb = withBackdropDiag(mb, diag);
     }
   } else {
-    const diag = backdropDiag(mb, ratio, null, false);
     nextModel = withBackdropDiag(modelSlice, diag);
     nextMb = withBackdropDiag(mb, diag);
   }
@@ -1222,13 +1562,22 @@ function backdropDiag(
   ratio: number | null,
   adjustment: number | null,
   applied: boolean,
+  extra?: {
+    samples30?: number | null;
+    clamped?: number | null;
+    tier?: 'low' | 'mid' | 'high' | null;
+    shiftFactor?: number | null;
+  },
 ): BackdropDiag {
   const m = mb.verdict.metrics;
   return {
     backdropMedian: m.referencePrice > 0 ? m.referencePrice : (m.median7 ?? null),
     backdropSamples7: m.samples7 ?? m.samples,
-    backdropSamples30: m.samples30 ?? null,
+    backdropSamples30: extra?.samples30 ?? m.samples30 ?? null,
     backdropRatio: ratio,
+    backdropRatioClamped: extra?.clamped ?? null,
+    backdropTier: extra?.tier ?? null,
+    backdropShiftFactor: extra?.shiftFactor ?? null,
     backdropAdjustment: adjustment,
     backdropAdjustmentApplied: applied,
   };
@@ -1247,6 +1596,7 @@ export function evaluateLotAllScopes(
   listingPrice: number,
   days = 7,
   feeRate = 0.05,
+  activeListings?: ActiveListing[] | null,
 ): ScopedLotEvaluation[] {
   const modelTrimmed = model?.trim() ?? '';
   const backdropTrimmed = backdrop?.trim() ?? '';
@@ -1271,6 +1621,7 @@ export function evaluateLotAllScopes(
       listingPrice,
       days,
       feeRate,
+      activeListings,
     );
     return {
       scope: verdict.scope,
@@ -1390,12 +1741,14 @@ function priceActionFromMetrics(
     getSalesVerdictThresholds();
   const discount = m.discountVsMedian;
   const margin = m.netMargin;
+  const bullish = m.trendStatus === 'bullish' || m.bullishDiscountApplied === true;
+  const marginNeed = buyMinMargin + (bullish ? getBullishMarginPremium() : 0);
   const extendedPrice =
-    s.verdict.evidence === 'extended' && !m.trendAdjusted;
-  const regularBuy = discount >= buyMinDiscount && margin >= buyMinMargin;
+    s.verdict.evidence === 'extended' && !m.trendAdjusted && !bullish;
+  const regularBuy = discount >= buyMinDiscount && margin >= marginNeed;
   const extendedBuy =
     discount >= buyMinDiscount + EXTENDED_BUY_EXTRA &&
-    margin >= buyMinMargin + EXTENDED_BUY_EXTRA;
+    margin >= marginNeed + EXTENDED_BUY_EXTRA;
   if (extendedPrice ? extendedBuy : regularBuy) return 'buy';
   if (discount >= watchMinDiscount && margin > 0) return 'watch';
   return 'skip';
@@ -1497,6 +1850,8 @@ function modelBackdropCanLead(s: ScopedLotEvaluation): boolean {
   if (s.scope !== 'model+backdrop') return false;
   if (isBackdropEnabledForAnalysis(s.backdrop)) return false;
   if (samples7of(s) < MIN_SAMPLES_TO_EVALUATE) return false;
+  const shift = s.verdict.metrics.backdropShiftFactor;
+  if (shift != null && shift < 1) return false;
   return usableForPrimary(s);
 }
 
@@ -1509,7 +1864,12 @@ function freshMarketSkip(
   chosen: ScopedLotEvaluation,
 ): boolean {
   if (s.verdict.evidence !== 'reliable' || s.verdict.action !== 'skip') return false;
-  if (!s.verdict.metrics.trendAdjusted) return false;
+  const status = s.verdict.metrics.trendStatus;
+  const bearish =
+    status != null
+      ? status === 'bearish'
+      : s.verdict.metrics.trendAdjusted === true;
+  if (!bearish) return false;
   if (SCOPE_SPECIFICITY[s.scope] <= SCOPE_SPECIFICITY[chosen.scope]) return false;
   if (s.scope === 'collection+backdrop') return false;
   if (
@@ -1547,6 +1907,9 @@ function mergeBackdropDiag(
         backdropSamples7: m.backdropSamples7,
         backdropSamples30: m.backdropSamples30,
         backdropRatio: m.backdropRatio,
+        backdropRatioClamped: m.backdropRatioClamped,
+        backdropTier: m.backdropTier,
+        backdropShiftFactor: m.backdropShiftFactor,
         backdropAdjustment: m.backdropAdjustment,
         backdropAdjustmentApplied: m.backdropAdjustmentApplied,
       },
@@ -1581,12 +1944,12 @@ export function pickPrimaryLotVerdict(
   } else {
     if (mb && !isBackdropEnabledForAnalysis(mb.backdrop)) {
       const n = samples7of(mb);
-      if (n >= BACKDROP_SUPPORT_MIN && n < MIN_SAMPLES_TO_EVALUATE) {
+      const tier = mb.verdict.metrics.backdropTier;
+      const shift = mb.verdict.metrics.backdropShiftFactor;
+      if (tier && shift != null && shift < 1) {
         notes.push(
-          `модель+фон — поддерживающий сигнал (${n} за 7д), не полная замена модели`,
+          `модель+фон ${tier}: сдвиг ${Math.round(shift * 100)}% отклонения (${n} за 7д), не полная замена модели`,
         );
-      } else if (n >= PREMIUM_MODEL_BACKDROP_MIN && n < BACKDROP_SUPPORT_MIN) {
-        notes.push(`модель+фон справочно (${n} за 7д), цену не меняет`);
       }
     }
     const usable = scoped.filter(usableOrdinaryScope);
@@ -1680,6 +2043,15 @@ export function pickPrimaryLotVerdict(
   };
 }
 
+/** После оценки только по продажам: есть смысл тянуть стакан saling. */
+export function isPotentiallyProfitableScoped(
+  scoped: ScopedLotEvaluation[],
+): boolean {
+  return scoped.some(
+    (s) => s.verdict.action === 'buy' || s.verdict.action === 'watch',
+  );
+}
+
 export function analyzeLot(
   collection: string,
   model: string | null | undefined,
@@ -1687,6 +2059,7 @@ export function analyzeLot(
   listingPrice: number,
   days = 7,
   feeRate = 0.05,
+  activeListings?: ActiveListing[] | null,
 ) {
   const scopes = evaluateLotAllScopes(
     collection,
@@ -1695,6 +2068,7 @@ export function analyzeLot(
     listingPrice,
     days,
     feeRate,
+    activeListings,
   );
   const picked = pickPrimaryLotVerdict(scopes);
   return {

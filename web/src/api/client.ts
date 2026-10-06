@@ -198,6 +198,14 @@ export async function analyzeLot(payload: {
   price: number;
   days?: number;
   feeRate?: number;
+  activeListings?: {
+    price: number;
+    collection: string;
+    model?: string | null;
+    backdrop?: string | null;
+    createdAt?: string | number | null;
+    id?: string | null;
+  }[];
 }) {
   const { data } = await api.post('/lot-analysis', payload);
   return data;

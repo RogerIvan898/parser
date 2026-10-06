@@ -23,6 +23,7 @@ import {
   decideFromSales,
   analyzeLot,
   getSaleById,
+  type ActiveListing,
 } from './db/analytics.js';
 import {
   loadCatalog,
@@ -527,6 +528,32 @@ interface DecideBody {
   floorPrice?: number;
   days?: number;
   feeRate?: number;
+  activeListings?: unknown;
+}
+
+function parseActiveListings(raw: unknown): ActiveListing[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: ActiveListing[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const row = item as Record<string, unknown>;
+    const price = Number(row.price);
+    const collection = String(row.collection ?? '').trim();
+    if (!collection || !Number.isFinite(price) || price <= 0) continue;
+    const created = row.createdAt;
+    out.push({
+      price,
+      collection,
+      model: row.model == null ? null : String(row.model),
+      backdrop: row.backdrop == null ? null : String(row.backdrop),
+      id: row.id == null ? null : String(row.id),
+      createdAt:
+        typeof created === 'string' || typeof created === 'number'
+          ? created
+          : null,
+    });
+  }
+  return out;
 }
 
 api.post('/decide', async (req, reply) => {
@@ -556,6 +583,7 @@ api.post('/decide', async (req, reply) => {
       price,
       days,
       feeRate,
+      parseActiveListings(body.activeListings),
     );
     return reply.send(result);
   } catch (err) {
@@ -591,6 +619,7 @@ api.post('/lot-analysis', async (req, reply) => {
       price,
       days,
       feeRate,
+      parseActiveListings(body.activeListings),
     );
     return reply.send(result);
   } catch (err) {

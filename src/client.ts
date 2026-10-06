@@ -280,6 +280,27 @@ export function makeSalingScannerFeedRequest(): SalingRequest {
   return makeDefaultSalingRequest({ count: 20, cursor: '' });
 }
 
+/** Стакан для оценки лота: те же фильтры, что в UI MRKT (коллекция / модель / фон). */
+export function makeSalingOrderBookRequest(params: {
+  collection: string;
+  model: string;
+  backdrop?: string | null;
+  count?: number;
+}): SalingRequest {
+  const collection = params.collection.trim();
+  const model = params.model.trim();
+  const backdrop = params.backdrop?.trim() ?? '';
+  return makeDefaultSalingRequest({
+    count: params.count ?? 20,
+    cursor: '',
+    collectionNames: collection ? [collection] : [],
+    modelNames: model ? [model] : [],
+    backdropNames: backdrop ? [backdrop] : [],
+    ordering: 'None',
+    lowToHigh: false,
+  });
+}
+
 export function makeDefaultSalingRequest(
   overrides: Partial<SalingRequest> = {},
 ): SalingRequest {

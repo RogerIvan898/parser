@@ -8,13 +8,16 @@ import {
 import { resolve } from 'node:path';
 import {
   fetchSalingWithRetry,
+  makeSalingOrderBookRequest,
   makeSalingScannerFeedRequest,
 } from './client.js';
 import type { Gift } from './types.js';
-import { nanoToTon } from './types.js';
+import { nanoToTon, withoutLockedListings } from './types.js';
 import {
-  evaluateLotAllScopes,
+  analyzeLot,
+  isPotentiallyProfitableScoped,
   pickPrimaryLotVerdict,
+  type ActiveListing,
   EXTENDED_BUY_EXTRA,
   EXTENDED_WINDOW_DAYS,
   MIN_SAMPLES_TO_EVALUATE,
@@ -41,8 +44,144 @@ export const RADAR_DEALS_FILE = resolve(DATA_DIR, 'radar-deals.json');
 export const SALING_BUYS_CSV = resolve(DATA_DIR, 'saling-buys.csv');
 
 const ANALYSIS_DAYS = 7;
+const ORDER_BOOK_SALING_COUNT = 20;
 const MAX_RECORDS = 400;
 const DEALS_STORE_VERSION = 4;
+
+function mapGiftsToActiveListings(gifts: Gift[]): ActiveListing[] {
+  const out: ActiveListing[] = [];
+  for (const gift of gifts) {
+    if (!gift.isOnSale || gift.salePrice <= 0) continue;
+    const collection = gift.collectionName || gift.collectionTitle || gift.title;
+    if (!collection?.trim()) continue;
+    const id = gift.id || gift.giftIdString;
+    out.push({
+      price: nanoToTon(gift.salePrice),
+      collection: collection.trim(),
+      model: gift.modelName || gift.modelTitle || null,
+      backdrop: gift.backdropName?.trim() || null,
+      id,
+      createdAt: gift.receivedDate || gift.promoteEndAt || null,
+    });
+  }
+  return out;
+}
+
+function orderBookCacheKey(
+  collection: string,
+  model: string,
+  backdrop: string,
+): string {
+  return `${collection}\0${model}\0${backdrop}`;
+}
+
+function activeListingsForGift(
+  cache: Map<string, ActiveListing[]>,
+  collection: string,
+  model: string,
+  backdrop: string,
+  excludeListingId: string,
+): ActiveListing[] {
+  const key = orderBookCacheKey(collection, model, backdrop);
+  const rows = cache.get(key) ?? [];
+  return rows.filter((row) => row.id !== excludeListingId);
+}
+
+async function ensureOrderBookCache(
+  cache: Map<string, ActiveListing[]>,
+  collection: string,
+  model: string,
+  backdrop: string,
+): Promise<number> {
+  const key = orderBookCacheKey(collection, model, backdrop);
+  if (cache.has(key)) return cache.get(key)!.length;
+  const res = await fetchSalingWithRetry(
+    makeSalingOrderBookRequest({
+      collection,
+      model,
+      backdrop: backdrop || null,
+      count: ORDER_BOOK_SALING_COUNT,
+    }),
+    { retries: 1, timeoutMs: 20_000 },
+  );
+  const listings = mapGiftsToActiveListings(withoutLockedListings(res.gifts));
+  cache.set(key, listings);
+  return listings.length;
+}
+
+type LotAnalysisResult = ReturnType<typeof analyzeLot>;
+
+function primaryPickFromAnalysis(
+  analysis: LotAnalysisResult,
+): PrimaryLotPick | null {
+  if (!analysis.primary) return null;
+  const evaluation = analysis.scopes.find(
+    (s) => s.scope === analysis.primary!.scope,
+  );
+  if (!evaluation) return null;
+  return {
+    evaluation,
+    confidence: analysis.primary.confidence,
+    notes: analysis.primary.notes,
+  };
+}
+
+async function analyzeGiftForScan(
+  gift: Gift,
+  collection: string,
+  feeRate: number,
+  orderBookCache: Map<string, ActiveListing[]>,
+): Promise<{
+  analysis: LotAnalysisResult;
+  orderBookFetched: boolean;
+  promising: boolean;
+}> {
+  const model = (gift.modelName || gift.modelTitle || '').trim();
+  const backdrop = gift.backdropName?.trim() ?? '';
+  const listingTon = nanoToTon(gift.salePrice);
+  let analysis = analyzeLot(
+    collection,
+    model || null,
+    backdrop || null,
+    listingTon,
+    ANALYSIS_DAYS,
+    feeRate,
+  );
+
+  const promising = isPotentiallyProfitableScoped(analysis.scopes);
+  if (!model || !promising) {
+    return { analysis, orderBookFetched: false, promising };
+  }
+
+  const listingId = gift.id || gift.giftIdString;
+  const n = await ensureOrderBookCache(
+    orderBookCache,
+    collection,
+    model,
+    backdrop,
+  );
+  const listings = activeListingsForGift(
+    orderBookCache,
+    collection,
+    model,
+    backdrop,
+    listingId,
+  );
+  analysis = analyzeLot(
+    collection,
+    model,
+    backdrop || null,
+    listingTon,
+    ANALYSIS_DAYS,
+    feeRate,
+    listings,
+  );
+  console.log(
+    `[saling] стакан ${collection} / ${model}${backdrop ? ` / ${backdrop}` : ''} ` +
+      `asks=${n} (без текущего ${listings.length})`,
+  );
+  return { analysis, orderBookFetched: true, promising };
+}
 
 /**
  * POST /api/v1/gifts/saling с пустыми фильтрами и ordering `None` —
@@ -77,6 +216,9 @@ export interface StoredDealMetrics {
   backdropSamples7?: number | null;
   backdropSamples30?: number | null;
   backdropRatio?: number | null;
+  backdropRatioClamped?: number | null;
+  backdropTier?: 'low' | 'mid' | 'high' | null;
+  backdropShiftFactor?: number | null;
   backdropAdjustment?: number | null;
   backdropAdjustmentApplied?: boolean;
 }
@@ -255,6 +397,14 @@ function metricsFromRaw(
     backdropSamples7: optNumOrNull(metrics.backdropSamples7),
     backdropSamples30: optNumOrNull(metrics.backdropSamples30),
     backdropRatio: optNumOrNull(metrics.backdropRatio),
+    backdropRatioClamped: optNumOrNull(metrics.backdropRatioClamped),
+    backdropTier:
+      metrics.backdropTier === 'low' ||
+      metrics.backdropTier === 'mid' ||
+      metrics.backdropTier === 'high'
+        ? metrics.backdropTier
+        : undefined,
+    backdropShiftFactor: optNumOrNull(metrics.backdropShiftFactor),
     backdropAdjustment: optNumOrNull(metrics.backdropAdjustment),
     backdropAdjustmentApplied:
       metrics.backdropAdjustmentApplied === undefined
@@ -293,6 +443,9 @@ function metricsFromVerdict(
     backdropSamples7: m.backdropSamples7,
     backdropSamples30: m.backdropSamples30,
     backdropRatio: m.backdropRatio,
+    backdropRatioClamped: m.backdropRatioClamped,
+    backdropTier: m.backdropTier,
+    backdropShiftFactor: m.backdropShiftFactor,
     backdropAdjustment: m.backdropAdjustment,
     backdropAdjustmentApplied: m.backdropAdjustmentApplied,
   };
@@ -528,9 +681,11 @@ function formatScopeEval(s: ScopedLotEvaluation): string {
   const win = s.verdict.metrics.windowDays ?? 7;
   const c = s.verdict.metrics.confidence;
   const trend =
-    s.verdict.metrics.trendAdjusted && s.verdict.metrics.trend != null
-      ? ` t${Math.round(s.verdict.metrics.trend * 100)}%`
-      : '';
+    s.verdict.metrics.trendStatus === 'bullish'
+      ? ` bull${s.verdict.metrics.trend != null ? Math.round(s.verdict.metrics.trend * 100) : ''}%`
+      : s.verdict.metrics.trendAdjusted && s.verdict.metrics.trend != null
+        ? ` t${Math.round(s.verdict.metrics.trend * 100)}%`
+        : '';
   return `${s.scope}=${s.verdict.action}/${ev}(Δ${d}% M${m}% n=${s.verdict.metrics.samples} ${win}д ${c} n7=${n7}${trend})`;
 }
 
@@ -630,6 +785,9 @@ export interface SalingScanStats {
   radarAdded: number;
   totalProfitInFile: number;
   totalRadarInFile: number;
+  /** Доп. POST /gifts/saling по кол+модель+фон после buy/watch по продажам */
+  orderBookFetches: number;
+  orderBookCandidates: number;
 }
 
 export async function scanSalingOnce(): Promise<SalingScanStats> {
@@ -648,7 +806,10 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
   let buyLots = 0;
   let buyScopeHits = 0;
   let watchLots = 0;
+  let orderBookFetches = 0;
+  let orderBookCandidates = 0;
   const feeRate = getParseFeeRate();
+  const orderBookCache = new Map<string, ActiveListing[]>();
 
   for (const gift of res.gifts) {
     const collection = gift.collectionName || gift.title;
@@ -656,18 +817,20 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
 
     analyzed++;
     const listingTon = nanoToTon(gift.salePrice);
-    const scoped = evaluateLotAllScopes(
-      collection,
-      gift.modelName,
-      gift.backdropName,
-      listingTon,
-      ANALYSIS_DAYS,
-      feeRate,
-    );
 
+    const { analysis, orderBookFetched, promising } = await analyzeGiftForScan(
+      gift,
+      collection,
+      feeRate,
+      orderBookCache,
+    );
+    if (promising) orderBookCandidates++;
+    if (orderBookFetched) orderBookFetches++;
+
+    const scoped = analysis.scopes;
     logSalingLotAnalysis(gift, collection, listingTon, scoped);
 
-    const picked = pickPrimaryLotVerdict(scoped);
+    const picked = primaryPickFromAnalysis(analysis);
     const buyScopeCount = scoped.filter(
       (s) => s.verdict.action === 'buy',
     ).length;
@@ -718,6 +881,8 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
     radarAdded,
     totalProfitInFile: profitStore.deals.length,
     totalRadarInFile: radarStore.deals.length,
+    orderBookFetches,
+    orderBookCandidates,
   };
 }
 
@@ -791,6 +956,7 @@ export async function runSalingScannerLoop(): Promise<void> {
         `[saling] лента ${s.scanned} → новых vs прошлый опрос: ${s.newVsPreviousScan}` +
           `, повтор: ${s.repeatVsPreviousScan}` +
           ` | анализ ${s.analyzed}, buy ${s.buyLots} (срезов ${s.buyScopeHits}), watch ${s.watchLots}` +
+        ` | стакан ${s.orderBookFetches}/${s.orderBookCandidates}` +
           (fileBits.length ? ` | ${fileBits.join(', ')}` : '') +
           ` | profit: ${s.totalProfitInFile}, radar: ${s.totalRadarInFile}`,
       );

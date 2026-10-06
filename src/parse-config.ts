@@ -32,6 +32,21 @@ export interface ParseConfig {
   buyMinDiscount: number | null;
   buyMinMargin: number | null;
   watchMinDiscount: number | null;
+  /** Добавка к buy-марже при trendStatus=bullish. null → 0.02 (+2 п.п.). */
+  bullishMarginPremium: number | null;
+  /** null → DEFAULT_BACKDROP_ADJUSTMENT */
+  backdropAdjustment: BackdropAdjustmentConfig | null;
+}
+
+export interface BackdropTierBand {
+  range: [number, number];
+  shiftFactor: number;
+}
+
+export interface BackdropAdjustmentConfig {
+  lowVolume: BackdropTierBand & { maxSales30: number; minSales7: number };
+  midVolume: BackdropTierBand & { maxSales30: number; minSales7: number };
+  highVolume: BackdropTierBand & { minSales30: number; minSales7: number };
 }
 
 export const DEFAULT_FEE_RATE = 0.02;
@@ -46,6 +61,30 @@ export const DEFAULT_SALES_VERDICT_THRESHOLDS: SalesVerdictThresholds = {
   buyMinDiscount: 0.08,
   buyMinMargin: 0.04,
   watchMinDiscount: 0.04,
+};
+
+/** На росте 3д buy требует эту добавку к марже. 0.02: было 4%, стало 6%. */
+export const DEFAULT_BULLISH_MARGIN_PREMIUM = 0.02;
+
+export const DEFAULT_BACKDROP_ADJUSTMENT: BackdropAdjustmentConfig = {
+  lowVolume: {
+    maxSales30: 14,
+    minSales7: 0,
+    range: [0.8, 1.2],
+    shiftFactor: 0.5,
+  },
+  midVolume: {
+    maxSales30: 29,
+    minSales7: 3,
+    range: [0.65, 1.4],
+    shiftFactor: 0.75,
+  },
+  highVolume: {
+    minSales30: 30,
+    minSales7: 7,
+    range: [0.5, 2],
+    shiftFactor: 1,
+  },
 };
 
 /** При включённом saling-сканере пауза между запросами каталога/history */
@@ -85,6 +124,8 @@ function emptyConfig(): ParseConfig {
     buyMinDiscount: null,
     buyMinMargin: null,
     watchMinDiscount: null,
+    bullishMarginPremium: null,
+    backdropAdjustment: null,
   };
 }
 
@@ -187,7 +228,73 @@ function normalizeConfig(raw: Partial<ParseConfig>): ParseConfig {
     buyMinDiscount: parseThresholdFraction(raw.buyMinDiscount),
     buyMinMargin: parseThresholdFraction(raw.buyMinMargin),
     watchMinDiscount: parseThresholdFraction(raw.watchMinDiscount),
+    bullishMarginPremium: parseThresholdFraction(raw.bullishMarginPremium),
+    backdropAdjustment: parseBackdropAdjustment(raw.backdropAdjustment),
   };
+}
+
+function parseBandRange(value: unknown, fallback: [number, number]): [number, number] {
+  if (!Array.isArray(value) || value.length < 2) return fallback;
+  const min = Number(value[0]);
+  const max = Number(value[1]);
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min <= 0 || max <= min) {
+    return fallback;
+  }
+  return [min, max];
+}
+
+function parseShiftFactor(value: unknown, fallback: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0 || n > 1) return fallback;
+  return n;
+}
+
+function parseCount(value: unknown, fallback: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.floor(n);
+}
+
+function parseBackdropAdjustment(value: unknown): BackdropAdjustmentConfig | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as {
+    lowVolume?: Record<string, unknown>;
+    midVolume?: Record<string, unknown>;
+    highVolume?: Record<string, unknown>;
+  };
+  const d = DEFAULT_BACKDROP_ADJUSTMENT;
+  const low = raw.lowVolume ?? {};
+  const mid = raw.midVolume ?? {};
+  const high = raw.highVolume ?? {};
+  return {
+    lowVolume: {
+      maxSales30: parseCount(low.maxSales30, d.lowVolume.maxSales30),
+      minSales7: parseCount(low.minSales7, d.lowVolume.minSales7),
+      range: parseBandRange(low.range, d.lowVolume.range),
+      shiftFactor: parseShiftFactor(low.shiftFactor, d.lowVolume.shiftFactor),
+    },
+    midVolume: {
+      maxSales30: parseCount(mid.maxSales30, d.midVolume.maxSales30),
+      minSales7: parseCount(mid.minSales7, d.midVolume.minSales7),
+      range: parseBandRange(mid.range, d.midVolume.range),
+      shiftFactor: parseShiftFactor(mid.shiftFactor, d.midVolume.shiftFactor),
+    },
+    highVolume: {
+      minSales30: parseCount(high.minSales30, d.highVolume.minSales30),
+      minSales7: parseCount(high.minSales7, d.highVolume.minSales7),
+      range: parseBandRange(high.range, d.highVolume.range),
+      shiftFactor: parseShiftFactor(high.shiftFactor, d.highVolume.shiftFactor),
+    },
+  };
+}
+
+export function getBackdropAdjustmentConfig(): BackdropAdjustmentConfig {
+  return loadParseConfig().backdropAdjustment ?? DEFAULT_BACKDROP_ADJUSTMENT;
+}
+
+export function getBullishMarginPremium(): number {
+  const cfg = loadParseConfig();
+  return cfg.bullishMarginPremium ?? DEFAULT_BULLISH_MARGIN_PREMIUM;
 }
 
 export function loadParseConfig(): ParseConfig {

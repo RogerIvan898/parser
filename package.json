@@ -11,7 +11,8 @@
     "parse": "tsx src/parser.ts",
     "server": "tsx src/server.ts",
     "sync-db": "tsx src/sync-mrkt-db.ts",
-    "catalog:hydrate": "tsx src/catalog-hydrate.ts"
+    "catalog:hydrate": "tsx src/catalog-hydrate.ts",
+    "test": "tsx --test src/db/analytics.bullish.test.ts src/db/analytics.backdrop-ratio.test.ts"
   },
   "dependencies": {
     "@fastify/static": "^10.1.5",
