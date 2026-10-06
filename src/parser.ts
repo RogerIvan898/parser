@@ -176,7 +176,7 @@ async function syncModelFeedPages(
         { timeoutMs: FEED_TIMEOUT_MS, retries: 5 },
       );
 
-      const added = insertFeedPage(database, res.items);
+      const { added, known } = insertFeedPage(database, res.items);
       try {
         saveSales(res.items);
       } catch (err) {
@@ -200,6 +200,12 @@ async function syncModelFeedPages(
       }
       if (res.items.length < FEED_API_PAGE_SIZE) {
         console.log(`[history] (${step}) ${logLabel}: неполная страница, конец`);
+        break;
+      }
+      if (known > 0) {
+        console.log(
+          `[history] (${step}) ${logLabel}: на стр.${page} уже есть ${known} в БД, старше не листаю`,
+        );
         break;
       }
       cursor = res.cursor;

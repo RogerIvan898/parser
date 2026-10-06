@@ -119,7 +119,7 @@ function initSchema(database: Database.Database): void {
 export function insertFeedPage(
   database: Database.Database,
   items: FeedItem[],
-): number {
+): { added: number; known: number } {
   const insert = database.prepare(`
     INSERT OR IGNORE INTO sales (
       id, amount, date, backdrop_name, model_name, collection_name
@@ -140,11 +140,13 @@ export function insertFeedPage(
       }[],
     ) => {
       let added = 0;
+      let known = 0;
       for (const sale of batch) {
         const info = insert.run(sale);
         if (info.changes > 0) added++;
+        else known++;
       }
-      return added;
+      return { added, known };
     },
   );
 
