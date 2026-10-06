@@ -62,6 +62,15 @@ export function getHistoryFeedBackdropNames(): readonly string[] {
   return HISTORY_FEED_BACKDROP_NAMES;
 }
 
+/** Срезы collection+backdrop / model+backdrop в оценке и saling — только эти фоны. */
+export function isBackdropEnabledForAnalysis(
+  backdrop: string | null | undefined,
+): boolean {
+  const name = backdrop?.trim();
+  if (!name) return false;
+  return (HISTORY_FEED_BACKDROP_NAMES as readonly string[]).includes(name);
+}
+
 function emptyConfig(): ParseConfig {
   return {
     version: 1,

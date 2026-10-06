@@ -67,14 +67,17 @@ export function Evaluate() {
   });
 
   const priceOk = typeof price === 'number' && price > 0;
-  const backdropOn = backdrop.trim().length > 0;
+  const backdropTrim = backdrop.trim();
+  const backdropSlices =
+    backdropTrim === 'Black' || backdropTrim === 'Onyx Black';
 
   return (
     <div>
       <h1>Оценка лота</h1>
       <p style={{ color: 'var(--text-dim)', marginTop: 0, maxWidth: 720 }}>
         Тот же разбор, что у сканера saling. Коллекция и модель считаются всегда.
-        Если выбран фон — добавляются срезы «коллекция + фон» и «модель + фон».
+        Срезы по фону только для <b>Black</b> и <b>Onyx Black</b>; остальные цвета
+        пока не учитываются (остаются коллекция и модель).
         Окно 7 дней, при нехватке продаж на срезе смотрим 30. Комиссия из настроек.
       </p>
 
@@ -115,7 +118,10 @@ export function Evaluate() {
         </div>
         <p style={{ color: 'var(--text-dim)', fontSize: 12, margin: '4px 0 0' }}>
           Срезы: коллекция, {model.trim() || 'модель'}
-          {backdropOn ? `, фон ${backdrop.trim()} (ещё коллекция+фон и модель+фон)` : ''}.
+          {backdropTrim
+            ? `, фон ${backdropTrim}${backdropSlices ? ' (+ срезы по фону)' : ' (без срезов по фону)'}`
+            : ''}
+          .
         </p>
       </div>
 

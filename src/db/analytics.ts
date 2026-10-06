@@ -1,4 +1,7 @@
-import { getSalesVerdictThresholds } from '../parse-config.js';
+import {
+  getSalesVerdictThresholds,
+  isBackdropEnabledForAnalysis,
+} from '../parse-config.js';
 import { NANO } from '../types.js';
 import { db } from './index.js';
 import { nowTs } from './storage.js';
@@ -891,7 +894,7 @@ export interface ScopedLotEvaluation {
 
 /**
  * Четыре явных среза по одному лоту (без отката getStatsSmart):
- * коллекция; кол+модель; кол+фон (если есть фон); кол+модель+фон.
+ * коллекция; кол+модель; кол+фон и кол+модель+фон — только для Black / Onyx Black.
  */
 export function evaluateLotAllScopes(
   collection: string,
@@ -909,7 +912,7 @@ export function evaluateLotAllScopes(
   if (modelTrimmed) {
     slices.push({ model: modelTrimmed, backdrop: null });
   }
-  if (backdropTrimmed) {
+  if (backdropTrimmed && isBackdropEnabledForAnalysis(backdropTrimmed)) {
     slices.push({ model: null, backdrop: backdropTrimmed });
     if (modelTrimmed) {
       slices.push({ model: modelTrimmed, backdrop: backdropTrimmed });
