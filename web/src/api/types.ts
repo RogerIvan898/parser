@@ -132,6 +132,13 @@ export interface LotAnalysis {
     notes: string[];
     metrics: DealVerdict['metrics'];
   } | null;
+  orderBook?: {
+    fetched: boolean;
+    asks: number;
+    used: number;
+    skippedReason: 'not_promising' | 'no_model' | null;
+    error: string | null;
+  };
 }
 
 // ============================================================

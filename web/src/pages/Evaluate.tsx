@@ -86,7 +86,10 @@ export function Evaluate() {
         <b>Black</b> и <b>Onyx Black</b> по-прежнему: если у
         коллекции с этим фоном ≥10 продаж, вердикт берётся от фона и модель его не
         отменяет. Надёжный свежий рынок модели (3 дня) отменяет buy по всей коллекции.
-        Окно 7 дней, при нехватке продаж на срезе смотрим 30. Комиссия из настроек.
+        Окно 7 дней, при нехватке продаж на срезе смотрим 30. Если по продажам есть
+        buy или watch, сервер сам запрашивает стакан{' '}
+        <code>POST /gifts/saling</code> по коллекции, модели и фону и пересчитывает
+        лот. Комиссия из настроек.
       </p>
 
       <div className="card">
@@ -248,6 +251,17 @@ export function Evaluate() {
                     {mutation.data.primary.metrics.backdropAdjustmentApplied
                       ? `, сдвиг ${((mutation.data.primary.metrics.backdropAdjustment ?? 0) * 100).toFixed(1)}%`
                       : ', цену не сдвигал'}
+                  </p>
+                )}
+                {mutation.data.orderBook && (
+                  <p style={{ color: 'var(--text-dim)', fontSize: 13 }}>
+                    {mutation.data.orderBook.fetched
+                      ? `Стакан с MRKT: ${mutation.data.orderBook.asks} лотов`
+                      : mutation.data.orderBook.error
+                        ? `Стакан не загрузился: ${mutation.data.orderBook.error}`
+                        : mutation.data.orderBook.skippedReason === 'not_promising'
+                          ? 'Стакан не запрашивали: по продажам нет buy/watch'
+                          : 'Стакан не запрашивали'}
                   </p>
                 )}
                 {mutation.data.primary.metrics.orderBookMetrics && (

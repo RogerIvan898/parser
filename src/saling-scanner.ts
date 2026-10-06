@@ -8,23 +8,20 @@ import {
 import { resolve } from 'node:path';
 import {
   fetchSalingWithRetry,
-  makeSalingOrderBookRequest,
   makeSalingScannerFeedRequest,
 } from './client.js';
 import type { Gift } from './types.js';
-import { nanoToTon, withoutLockedListings } from './types.js';
+import { nanoToTon } from './types.js';
 import {
-  analyzeLot,
-  isPotentiallyProfitableScoped,
   pickPrimaryLotVerdict,
   type ActiveListing,
+  type PrimaryLotPick,
   EXTENDED_BUY_EXTRA,
   EXTENDED_WINDOW_DAYS,
   MIN_SAMPLES_TO_EVALUATE,
   PRICE_STABILITY_OK,
   WEAK_SAMPLES,
   type DealVerdict,
-  type PrimaryLotPick,
   type ScopedLotEvaluation,
 } from './db/analytics.js';
 import {
@@ -37,6 +34,10 @@ import {
   getSalesVerdictThresholds,
 } from './parse-config.js';
 import { DATA_DIR } from './store.js';
+import {
+  analyzeLotWithLiveOrderBook,
+  type LotAnalysisResult,
+} from './order-book.js';
 
 export const PROFIT_DEALS_FILE = resolve(DATA_DIR, 'profit-deals.json');
 export const RADAR_DEALS_FILE = resolve(DATA_DIR, 'radar-deals.json');
@@ -44,87 +45,8 @@ export const RADAR_DEALS_FILE = resolve(DATA_DIR, 'radar-deals.json');
 export const SALING_BUYS_CSV = resolve(DATA_DIR, 'saling-buys.csv');
 
 const ANALYSIS_DAYS = 7;
-const ORDER_BOOK_SALING_COUNT = 20;
 const MAX_RECORDS = 400;
 const DEALS_STORE_VERSION = 4;
-
-function mapGiftsToActiveListings(gifts: Gift[]): ActiveListing[] {
-  const out: ActiveListing[] = [];
-  for (const gift of gifts) {
-    if (!gift.isOnSale || gift.salePrice <= 0) continue;
-    const collection = gift.collectionName || gift.collectionTitle || gift.title;
-    if (!collection?.trim()) continue;
-    const id = gift.id || gift.giftIdString;
-    out.push({
-      price: nanoToTon(gift.salePrice),
-      collection: collection.trim(),
-      model: gift.modelName || gift.modelTitle || null,
-      backdrop: gift.backdropName?.trim() || null,
-      id,
-      createdAt: gift.receivedDate || gift.promoteEndAt || null,
-    });
-  }
-  return out;
-}
-
-function orderBookCacheKey(
-  collection: string,
-  model: string,
-  backdrop: string,
-): string {
-  return `${collection}\0${model}\0${backdrop}`;
-}
-
-function activeListingsForGift(
-  cache: Map<string, ActiveListing[]>,
-  collection: string,
-  model: string,
-  backdrop: string,
-  excludeListingId: string,
-): ActiveListing[] {
-  const key = orderBookCacheKey(collection, model, backdrop);
-  const rows = cache.get(key) ?? [];
-  return rows.filter((row) => row.id !== excludeListingId);
-}
-
-async function ensureOrderBookCache(
-  cache: Map<string, ActiveListing[]>,
-  collection: string,
-  model: string,
-  backdrop: string,
-): Promise<number> {
-  const key = orderBookCacheKey(collection, model, backdrop);
-  if (cache.has(key)) return cache.get(key)!.length;
-  const res = await fetchSalingWithRetry(
-    makeSalingOrderBookRequest({
-      collection,
-      model,
-      backdrop: backdrop || null,
-      count: ORDER_BOOK_SALING_COUNT,
-    }),
-    { retries: 1, timeoutMs: 20_000 },
-  );
-  const listings = mapGiftsToActiveListings(withoutLockedListings(res.gifts));
-  cache.set(key, listings);
-  return listings.length;
-}
-
-type LotAnalysisResult = ReturnType<typeof analyzeLot>;
-
-function primaryPickFromAnalysis(
-  analysis: LotAnalysisResult,
-): PrimaryLotPick | null {
-  if (!analysis.primary) return null;
-  const evaluation = analysis.scopes.find(
-    (s) => s.scope === analysis.primary!.scope,
-  );
-  if (!evaluation) return null;
-  return {
-    evaluation,
-    confidence: analysis.primary.confidence,
-    notes: analysis.primary.notes,
-  };
-}
 
 async function analyzeGiftForScan(
   gift: Gift,
@@ -138,49 +60,22 @@ async function analyzeGiftForScan(
 }> {
   const model = (gift.modelName || gift.modelTitle || '').trim();
   const backdrop = gift.backdropName?.trim() ?? '';
-  const listingTon = nanoToTon(gift.salePrice);
-  let analysis = analyzeLot(
-    collection,
-    model || null,
-    backdrop || null,
-    listingTon,
-    ANALYSIS_DAYS,
-    feeRate,
-  );
-
-  const promising = isPotentiallyProfitableScoped(analysis.scopes);
-  if (!model || !promising) {
-    return { analysis, orderBookFetched: false, promising };
-  }
-
-  const listingId = gift.id || gift.giftIdString;
-  const n = await ensureOrderBookCache(
-    orderBookCache,
+  const analysis = await analyzeLotWithLiveOrderBook({
     collection,
     model,
     backdrop,
-  );
-  const listings = activeListingsForGift(
-    orderBookCache,
-    collection,
-    model,
-    backdrop,
-    listingId,
-  );
-  analysis = analyzeLot(
-    collection,
-    model,
-    backdrop || null,
-    listingTon,
-    ANALYSIS_DAYS,
+    listingPrice: nanoToTon(gift.salePrice),
+    days: ANALYSIS_DAYS,
     feeRate,
-    listings,
-  );
-  console.log(
-    `[saling] стакан ${collection} / ${model}${backdrop ? ` / ${backdrop}` : ''} ` +
-      `asks=${n} (без текущего ${listings.length})`,
-  );
-  return { analysis, orderBookFetched: true, promising };
+    excludeListingId: gift.id || gift.giftIdString,
+    cache: orderBookCache,
+    logPrefix: '[saling]',
+  });
+  return {
+    analysis,
+    orderBookFetched: analysis.orderBook.fetched,
+    promising: analysis.orderBook.skippedReason === null,
+  };
 }
 
 /**
@@ -830,7 +725,7 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
     const scoped = analysis.scopes;
     logSalingLotAnalysis(gift, collection, listingTon, scoped);
 
-    const picked = primaryPickFromAnalysis(analysis);
+    const picked = pickPrimaryLotVerdict(scoped);
     const buyScopeCount = scoped.filter(
       (s) => s.verdict.action === 'buy',
     ).length;

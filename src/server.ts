@@ -21,10 +21,10 @@ import {
   evaluateListing,
   decide,
   decideFromSales,
-  analyzeLot,
   getSaleById,
   type ActiveListing,
 } from './db/analytics.js';
+import { analyzeLotWithLiveOrderBook } from './order-book.js';
 import {
   loadCatalog,
   loadMarket,
@@ -612,15 +612,15 @@ api.post('/lot-analysis', async (req, reply) => {
       : String(body.backdrop);
 
   try {
-    const result = analyzeLot(
+    const result = await analyzeLotWithLiveOrderBook({
       collection,
       model,
       backdrop,
-      price,
+      listingPrice: price,
       days,
       feeRate,
-      parseActiveListings(body.activeListings),
-    );
+      logPrefix: '[lot]',
+    });
     return reply.send(result);
   } catch (err) {
     req.log.error(err);
