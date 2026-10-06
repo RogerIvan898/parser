@@ -153,17 +153,6 @@ export interface HealthResponse {
 // Saling scanner (profit / radar)
 // ============================================================
 
-export interface SalingDealVerdict {
-  action: 'buy' | 'watch' | 'skip';
-  scope: string;
-  metrics: {
-    netMargin: number;
-    discountVsMedian: number;
-    samples: number;
-    confidence: string;
-  };
-}
-
 export interface SalingDealMetricsFull {
   listingPrice: number;
   referencePrice: number;
@@ -190,46 +179,54 @@ export interface SalingScopeVerdict {
   metrics: SalingDealMetricsFull;
 }
 
-export interface SalingDealRecord {
-  detectedAt: string;
-  listingId: string;
-  giftId: string;
-  collection: string;
-  model: string;
-  backdrop: string;
-  priceTon: number;
-  verdict: SalingDealVerdict;
-  signals?: string[];
+export interface SalingAnalysisThresholds {
+  buyMinDiscount: number;
+  buyMinMargin: number;
+  watchMinDiscount: number;
+  extendedBuyExtra: number;
+  minSamplesReliable: number;
+  weakSamples: number;
+  extendedWindowDays: number;
+  priceStabilityOk: number;
 }
 
-export interface RadarDealRecord {
+export interface SalingPrimaryVerdict {
+  scope: string;
+  action: 'buy' | 'watch';
+  evidence?: string;
+  reason: string;
+  confidence: string;
+  metrics: SalingDealMetricsFull;
+}
+
+export interface SalingAnalysisRecord {
   detectedAt: string;
   listingId: string;
   giftId: string;
+  giftNumber: number | null;
   collection: string;
   model: string;
   backdrop: string;
   priceTon: number;
   analysisDays: number;
   feeRate: number;
-  primary: {
-    scope: string;
-    action: 'watch';
-    evidence?: string;
-    reason: string;
-    confidence: string;
-    metrics: SalingDealMetricsFull;
-  };
+  backdropSlicesEnabled: boolean;
+  buyScopeCount: number;
+  thresholds: SalingAnalysisThresholds;
+  primary: SalingPrimaryVerdict;
   scopes: SalingScopeVerdict[];
-  signals?: string[];
+  signals: string[];
 }
+
+export type SalingDealRecord = SalingAnalysisRecord;
+export type RadarDealRecord = SalingAnalysisRecord;
 
 export interface SalingDealsResponse {
   file: string;
   version?: number;
   updatedAt: string;
   total: number;
-  deals: SalingDealRecord[];
+  deals: SalingAnalysisRecord[];
 }
 
 export interface RadarDealsResponse {
@@ -237,5 +234,5 @@ export interface RadarDealsResponse {
   version?: number;
   updatedAt: string;
   total: number;
-  deals: RadarDealRecord[];
+  deals: SalingAnalysisRecord[];
 }

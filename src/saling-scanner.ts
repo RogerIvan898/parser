@@ -15,6 +15,11 @@ import { nanoToTon } from './types.js';
 import {
   evaluateLotAllScopes,
   pickPrimaryLotVerdict,
+  EXTENDED_BUY_EXTRA,
+  EXTENDED_WINDOW_DAYS,
+  MIN_SAMPLES_TO_EVALUATE,
+  PRICE_STABILITY_OK,
+  WEAK_SAMPLES,
   type DealVerdict,
   type PrimaryLotPick,
   type ScopedLotEvaluation,
@@ -22,9 +27,11 @@ import {
 import {
   isSalingScannerEnabled,
   isCollectionEnabledForParse,
+  isBackdropEnabledForAnalysis,
   SALING_SCANNER_INTERVAL_MS,
   SALING_SCANNER_JITTER_MS,
   getParseFeeRate,
+  getSalesVerdictThresholds,
 } from './parse-config.js';
 import { DATA_DIR } from './store.js';
 
@@ -35,34 +42,13 @@ export const SALING_BUYS_CSV = resolve(DATA_DIR, 'saling-buys.csv');
 
 const ANALYSIS_DAYS = 7;
 const MAX_RECORDS = 400;
+const DEALS_STORE_VERSION = 4;
 
 /**
  * POST /api/v1/gifts/saling с пустыми фильтрами и ordering `None` —
  * в ответе порция **недавно выставленных** лотов (как лента в MRKT), не «топ дешёвых».
  * Тело совпадает с `makeSalingScannerFeedRequest()` в client.ts (count: 20).
  */
-
-export interface ProfitDealRecord {
-  detectedAt: string;
-  listingId: string;
-  giftId: string;
-  collection: string;
-  model: string;
-  backdrop: string;
-  priceTon: number;
-  verdict: {
-    action: 'buy' | 'watch' | 'skip';
-    scope: string;
-    metrics: {
-      netMargin: number;
-      discountVsMedian: number;
-      samples: number;
-      confidence: string;
-    };
-  };
-  /** Соседние срезы, которые не стали вердиктом (мало данных, слабая выборка). */
-  signals?: string[];
-}
 
 /** Полные метрики среза (как в decideFromSales / оценке в UI). */
 export interface StoredDealMetrics {
@@ -91,39 +77,59 @@ export interface StoredScopeVerdict {
   metrics: StoredDealMetrics;
 }
 
-/** radar-deals.json v3 — весь разбор лота для ручного снайпинга. */
-export interface RadarDealRecord {
+export interface StoredAnalysisThresholds {
+  buyMinDiscount: number;
+  buyMinMargin: number;
+  watchMinDiscount: number;
+  extendedBuyExtra: number;
+  minSamplesReliable: number;
+  weakSamples: number;
+  extendedWindowDays: number;
+  priceStabilityOk: number;
+}
+
+export interface StoredPrimaryVerdict {
+  scope: string;
+  action: 'buy' | 'watch';
+  evidence?: string;
+  reason: string;
+  confidence: string;
+  metrics: StoredDealMetrics;
+}
+
+/** profit-deals.json / radar-deals.json v4 — полный «мыслительный» снимок. */
+export interface SalingAnalysisRecord {
   detectedAt: string;
   listingId: string;
   giftId: string;
+  giftNumber: number | null;
   collection: string;
   model: string;
   backdrop: string;
   priceTon: number;
   analysisDays: number;
   feeRate: number;
-  primary: {
-    scope: string;
-    action: 'watch';
-    evidence?: string;
-    reason: string;
-    confidence: string;
-    metrics: StoredDealMetrics;
-  };
+  backdropSlicesEnabled: boolean;
+  buyScopeCount: number;
+  thresholds: StoredAnalysisThresholds;
+  primary: StoredPrimaryVerdict;
   scopes: StoredScopeVerdict[];
-  signals?: string[];
+  signals: string[];
 }
 
+export type ProfitDealRecord = SalingAnalysisRecord;
+export type RadarDealRecord = SalingAnalysisRecord;
+
 interface ProfitDealsStore {
-  version: 2;
+  version: number;
   updatedAt: string;
-  deals: ProfitDealRecord[];
+  deals: SalingAnalysisRecord[];
 }
 
 interface RadarDealsStore {
-  version: 3;
+  version: number;
   updatedAt: string;
-  deals: RadarDealRecord[];
+  deals: SalingAnalysisRecord[];
 }
 
 function sleep(ms: number): Promise<void> {
@@ -138,44 +144,39 @@ function salingPauseMs(): number {
 }
 
 function loadProfitStore(): ProfitDealsStore {
-  if (!existsSync(PROFIT_DEALS_FILE)) {
-    return { version: 2, updatedAt: new Date().toISOString(), deals: [] };
-  }
-  try {
-    const raw = JSON.parse(readFileSync(PROFIT_DEALS_FILE, 'utf-8')) as {
-      deals?: unknown[];
-    };
-    const deals = (Array.isArray(raw.deals) ? raw.deals : [])
-      .map((d) => slimProfitDealRecord(d))
-      .filter((d): d is ProfitDealRecord => d !== null);
-    return {
-      version: 2,
-      updatedAt: new Date().toISOString(),
-      deals,
-    };
-  } catch {
-    return { version: 2, updatedAt: new Date().toISOString(), deals: [] };
-  }
+  return loadAnalysisStore(PROFIT_DEALS_FILE);
 }
 
 function loadRadarStore(): RadarDealsStore {
-  if (!existsSync(RADAR_DEALS_FILE)) {
-    return { version: 3, updatedAt: new Date().toISOString(), deals: [] };
+  return loadAnalysisStore(RADAR_DEALS_FILE);
+}
+
+function loadAnalysisStore(file: string): ProfitDealsStore {
+  if (!existsSync(file)) {
+    return {
+      version: DEALS_STORE_VERSION,
+      updatedAt: new Date().toISOString(),
+      deals: [],
+    };
   }
   try {
-    const raw = JSON.parse(readFileSync(RADAR_DEALS_FILE, 'utf-8')) as {
+    const raw = JSON.parse(readFileSync(file, 'utf-8')) as {
       deals?: unknown[];
     };
     const deals = (Array.isArray(raw.deals) ? raw.deals : [])
-      .map((d) => parseRadarDealRecord(d))
-      .filter((d): d is RadarDealRecord => d !== null);
+      .map((d) => parseAnalysisRecord(d))
+      .filter((d): d is SalingAnalysisRecord => d !== null);
     return {
-      version: 3,
+      version: DEALS_STORE_VERSION,
       updatedAt: new Date().toISOString(),
       deals,
     };
   } catch {
-    return { version: 3, updatedAt: new Date().toISOString(), deals: [] };
+    return {
+      version: DEALS_STORE_VERSION,
+      updatedAt: new Date().toISOString(),
+      deals: [],
+    };
   }
 }
 
@@ -250,254 +251,210 @@ function scopeFromEval(s: ScopedLotEvaluation): StoredScopeVerdict {
   };
 }
 
-function parseRadarDealRecord(raw: unknown): RadarDealRecord | null {
+function currentThresholds(): StoredAnalysisThresholds {
+  const t = getSalesVerdictThresholds();
+  return {
+    buyMinDiscount: t.buyMinDiscount,
+    buyMinMargin: t.buyMinMargin,
+    watchMinDiscount: t.watchMinDiscount,
+    extendedBuyExtra: EXTENDED_BUY_EXTRA,
+    minSamplesReliable: MIN_SAMPLES_TO_EVALUATE,
+    weakSamples: WEAK_SAMPLES,
+    extendedWindowDays: EXTENDED_WINDOW_DAYS,
+    priceStabilityOk: PRICE_STABILITY_OK,
+  };
+}
+
+function parseScopesFromRaw(o: Record<string, unknown>): StoredScopeVerdict[] {
+  if (!Array.isArray(o.scopes)) return [];
+  return o.scopes.flatMap((s) => {
+    if (!s || typeof s !== 'object') return [];
+    const row = s as Record<string, unknown>;
+    const sm = row.metrics as Record<string, unknown> | undefined;
+    if (!sm || typeof row.scope !== 'string') return [];
+    const out: StoredScopeVerdict = {
+      scope: row.scope,
+      model:
+        row.model === null || typeof row.model === 'string' ? row.model : null,
+      backdrop:
+        row.backdrop === null || typeof row.backdrop === 'string'
+          ? row.backdrop
+          : null,
+      action: String(row.action ?? 'skip'),
+      reason: String(row.reason ?? ''),
+      metrics: metricsFromRaw(sm),
+    };
+    if (typeof row.evidence === 'string') out.evidence = row.evidence;
+    return [out];
+  });
+}
+
+function parsePrimaryFromRaw(
+  o: Record<string, unknown>,
+  fallbackAction: 'buy' | 'watch',
+): StoredPrimaryVerdict | null {
+  const legacyVerdict = o.verdict as Record<string, unknown> | undefined;
+  const primaryRaw = (o.primary ?? legacyVerdict) as
+    | Record<string, unknown>
+    | undefined;
+  if (!primaryRaw || typeof primaryRaw !== 'object') return null;
+  const pm = (primaryRaw.metrics ?? o.metrics) as
+    | Record<string, unknown>
+    | undefined;
+  if (!pm) return null;
+  const rawAction = primaryRaw.action ?? legacyVerdict?.action ?? o.action;
+  const action: 'buy' | 'watch' =
+    rawAction === 'buy' ? 'buy' : rawAction === 'watch' ? 'watch' : fallbackAction;
+  const confidence = String(
+    primaryRaw.confidence ?? pm.confidence ?? 'low',
+  );
+  const primary: StoredPrimaryVerdict = {
+    scope: String(primaryRaw.scope ?? legacyVerdict?.scope ?? ''),
+    action,
+    reason: String(primaryRaw.reason ?? legacyVerdict?.reason ?? ''),
+    confidence,
+    metrics: metricsFromRaw(pm, confidence),
+  };
+  const ev = primaryRaw.evidence ?? legacyVerdict?.evidence;
+  if (typeof ev === 'string') primary.evidence = ev;
+  return primary;
+}
+
+function parseAnalysisRecord(raw: unknown): SalingAnalysisRecord | null {
   if (!raw || typeof raw !== 'object') return null;
   const o = raw as Record<string, unknown>;
   if (typeof o.listingId !== 'string' || typeof o.giftId !== 'string') {
     return null;
   }
 
-  const primaryRaw = o.primary as Record<string, unknown> | undefined;
-  if (primaryRaw && typeof primaryRaw === 'object') {
-    const pm = primaryRaw.metrics as Record<string, unknown> | undefined;
-    if (!pm) return null;
-    const scopes: StoredScopeVerdict[] = Array.isArray(o.scopes)
-      ? o.scopes.flatMap((s) => {
-          if (!s || typeof s !== 'object') return [];
-          const row = s as Record<string, unknown>;
-          const sm = row.metrics as Record<string, unknown> | undefined;
-          if (!sm || typeof row.scope !== 'string') return [];
-          const out: StoredScopeVerdict = {
-            scope: row.scope,
-            model:
-              row.model === null || typeof row.model === 'string'
-                ? row.model
-                : null,
-            backdrop:
-              row.backdrop === null || typeof row.backdrop === 'string'
-                ? row.backdrop
-                : null,
-            action: String(row.action ?? 'skip'),
-            reason: String(row.reason ?? ''),
-            metrics: metricsFromRaw(sm),
-          };
-          if (typeof row.evidence === 'string') {
-            out.evidence = row.evidence;
-          }
-          return [out];
-        })
-      : [];
-
-    return {
-      detectedAt:
-        typeof o.detectedAt === 'string'
-          ? o.detectedAt
-          : new Date().toISOString(),
-      listingId: o.listingId,
-      giftId: o.giftId,
-      collection: String(o.collection ?? ''),
-      model: String(o.model ?? ''),
-      backdrop: String(o.backdrop ?? ''),
-      priceTon: num(o.priceTon),
-      analysisDays: num(o.analysisDays) || ANALYSIS_DAYS,
-      feeRate: num(o.feeRate),
-      primary: {
-        scope: String(primaryRaw.scope ?? ''),
-        action: 'watch',
-        evidence:
-          typeof primaryRaw.evidence === 'string'
-            ? primaryRaw.evidence
-            : undefined,
-        reason: String(primaryRaw.reason ?? ''),
-        confidence: String(primaryRaw.confidence ?? pm.confidence ?? 'low'),
-        metrics: metricsFromRaw(
-          pm,
-          String(primaryRaw.confidence ?? pm.confidence ?? 'low'),
-        ),
-      },
-      scopes,
-      signals: Array.isArray(o.signals)
-        ? o.signals.filter((s): s is string => typeof s === 'string')
-        : undefined,
-    };
-  }
-
-  const slim = slimProfitDealRecord(raw);
-  if (!slim || slim.verdict.action !== 'watch') return null;
-  const m = slim.verdict.metrics;
-  const stubMetrics: StoredDealMetrics = {
-    listingPrice: slim.priceTon,
-    referencePrice: 0,
-    floorPrice: 0,
-    discountVsMedian: m.discountVsMedian,
-    discountVsFloor: 0,
-    netMargin: m.netMargin,
-    confidence: m.confidence,
-    samples: m.samples,
-    salesPerDay: 0,
-  };
-  return {
-    detectedAt: slim.detectedAt,
-    listingId: slim.listingId,
-    giftId: slim.giftId,
-    collection: slim.collection,
-    model: slim.model,
-    backdrop: slim.backdrop,
-    priceTon: slim.priceTon,
-    analysisDays: ANALYSIS_DAYS,
-    feeRate: 0,
-    primary: {
-      scope: slim.verdict.scope,
-      action: 'watch',
-      reason: '',
-      confidence: m.confidence,
-      metrics: stubMetrics,
-    },
-    scopes: [
-      {
-        scope: slim.verdict.scope,
-        model: slim.model || null,
-        backdrop: slim.backdrop || null,
-        action: 'watch',
-        reason: '',
-        metrics: stubMetrics,
-      },
-    ],
-    signals: slim.signals,
-  };
-}
-
-function slimProfitDealRecord(raw: unknown): ProfitDealRecord | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const o = raw as Record<string, unknown>;
-  const listingId = o.listingId;
-  const giftId = o.giftId;
-  if (typeof listingId !== 'string' || typeof giftId !== 'string') return null;
+  const hasPrimary = o.primary != null || o.verdict != null;
+  if (!hasPrimary) return null;
 
   const legacyVerdict = o.verdict as Record<string, unknown> | undefined;
-  const metrics = (legacyVerdict?.metrics ?? o.metrics) as
-    | Record<string, unknown>
-    | undefined;
-  if (!metrics || typeof metrics !== 'object') return null;
+  const legacyAction = legacyVerdict?.action ?? o.action;
+  const fallback: 'buy' | 'watch' = legacyAction === 'buy' ? 'buy' : 'watch';
+  const primary = parsePrimaryFromRaw(o, fallback);
+  if (!primary) return null;
 
-  const scope =
-    typeof legacyVerdict?.scope === 'string'
-      ? legacyVerdict.scope
-      : typeof o.scope === 'string'
-        ? o.scope
-        : '';
-  const action = legacyVerdict?.action ?? o.action;
-  if (action !== 'buy' && action !== 'watch' && action !== 'skip') return null;
+  const scopes = parseScopesFromRaw(o);
+  const stubFromPrimary = (): StoredScopeVerdict[] =>
+    scopes.length > 0
+      ? scopes
+      : [
+          {
+            scope: primary.scope,
+            model: String(o.model ?? '') || null,
+            backdrop: String(o.backdrop ?? '') || null,
+            action: primary.action,
+            evidence: primary.evidence,
+            reason: primary.reason,
+            metrics: primary.metrics,
+          },
+        ];
+
+  const thrRaw = o.thresholds as Record<string, unknown> | undefined;
+  const thresholds: StoredAnalysisThresholds = thrRaw
+    ? {
+        buyMinDiscount: num(thrRaw.buyMinDiscount) || 0.08,
+        buyMinMargin: num(thrRaw.buyMinMargin) || 0.04,
+        watchMinDiscount: num(thrRaw.watchMinDiscount) || 0.04,
+        extendedBuyExtra: num(thrRaw.extendedBuyExtra) || EXTENDED_BUY_EXTRA,
+        minSamplesReliable:
+          num(thrRaw.minSamplesReliable) || MIN_SAMPLES_TO_EVALUATE,
+        weakSamples: num(thrRaw.weakSamples) || WEAK_SAMPLES,
+        extendedWindowDays:
+          num(thrRaw.extendedWindowDays) || EXTENDED_WINDOW_DAYS,
+        priceStabilityOk: num(thrRaw.priceStabilityOk) || PRICE_STABILITY_OK,
+      }
+    : currentThresholds();
+
+  const signals = Array.isArray(o.signals)
+    ? o.signals.filter((s): s is string => typeof s === 'string')
+    : [];
 
   return {
     detectedAt:
       typeof o.detectedAt === 'string'
         ? o.detectedAt
         : new Date().toISOString(),
-    listingId,
-    giftId,
+    listingId: o.listingId,
+    giftId: o.giftId,
+    giftNumber:
+      typeof o.giftNumber === 'number' && Number.isFinite(o.giftNumber)
+        ? o.giftNumber
+        : null,
     collection: String(o.collection ?? ''),
     model: String(o.model ?? ''),
     backdrop: String(o.backdrop ?? ''),
-    priceTon: Number(o.priceTon) || 0,
-    verdict: {
-      action,
-      scope,
-      metrics: {
-        netMargin: Number(metrics.netMargin) || 0,
-        discountVsMedian: Number(metrics.discountVsMedian) || 0,
-        samples: Number(metrics.samples) || 0,
-        confidence: String(metrics.confidence ?? 'low'),
-      },
-    },
-    signals: Array.isArray(o.signals)
-      ? o.signals.filter((s): s is string => typeof s === 'string')
-      : undefined,
+    priceTon: num(o.priceTon),
+    analysisDays: num(o.analysisDays) || ANALYSIS_DAYS,
+    feeRate: num(o.feeRate),
+    backdropSlicesEnabled:
+      o.backdropSlicesEnabled === true ||
+      isBackdropEnabledForAnalysis(String(o.backdrop ?? '')),
+    buyScopeCount: num(o.buyScopeCount),
+    thresholds,
+    primary,
+    scopes: stubFromPrimary(),
+    signals,
   };
 }
 
-function saveProfitStore(store: ProfitDealsStore): void {
-  mkdirSync(DATA_DIR, { recursive: true });
-  store.version = 2;
-  store.updatedAt = new Date().toISOString();
-  writeFileSync(PROFIT_DEALS_FILE, JSON.stringify(store, null, 2), 'utf-8');
-}
-
-function saveRadarStore(store: RadarDealsStore): void {
-  mkdirSync(DATA_DIR, { recursive: true });
-  store.version = 3;
-  store.updatedAt = new Date().toISOString();
-  writeFileSync(RADAR_DEALS_FILE, JSON.stringify(store, null, 2), 'utf-8');
-}
-
-function giftToProfitRecord(
-  gift: Gift,
-  picked: PrimaryLotPick,
-): ProfitDealRecord {
-  const collection = gift.collectionName || gift.collectionTitle || gift.title;
-  const model = gift.modelName || gift.modelTitle || '';
-  const best = picked.evaluation;
-  const m = best.verdict.metrics;
-  const action = best.verdict.action;
-  if (action !== 'buy' && action !== 'watch') {
-    throw new Error('giftToRecord: только buy/watch');
-  }
-
-  return {
-    detectedAt: new Date().toISOString(),
-    listingId: gift.id,
-    giftId: gift.giftIdString,
-    collection,
-    model,
-    backdrop: gift.backdropName ?? '',
-    priceTon: nanoToTon(gift.salePrice),
-    verdict: {
-      action,
-      scope: best.scope,
-      metrics: {
-        netMargin: m.netMargin,
-        discountVsMedian: m.discountVsMedian,
-        samples: m.samples,
-        confidence: picked.confidence,
-      },
-    },
-    signals: picked.notes.length > 0 ? picked.notes : undefined,
-  };
-}
-
-function giftToRadarRecord(
+function buildAnalysisRecord(
   gift: Gift,
   picked: PrimaryLotPick,
   scoped: ScopedLotEvaluation[],
   feeRate: number,
   analysisDays: number,
-): RadarDealRecord {
+  buyScopeCount: number,
+): SalingAnalysisRecord {
   const collection = gift.collectionName || gift.collectionTitle || gift.title;
   const model = gift.modelName || gift.modelTitle || '';
+  const backdrop = gift.backdropName?.trim() ?? '';
   const best = picked.evaluation;
   const v = best.verdict;
+  const action: 'buy' | 'watch' =
+    v.action === 'buy' || v.action === 'watch' ? v.action : 'watch';
 
   return {
     detectedAt: new Date().toISOString(),
     listingId: gift.id,
     giftId: gift.giftIdString,
+    giftNumber: Number.isFinite(gift.number) ? gift.number : null,
     collection,
     model,
-    backdrop: gift.backdropName ?? '',
+    backdrop,
     priceTon: nanoToTon(gift.salePrice),
     analysisDays,
     feeRate,
+    backdropSlicesEnabled: isBackdropEnabledForAnalysis(backdrop),
+    buyScopeCount,
+    thresholds: currentThresholds(),
     primary: {
       scope: best.scope,
-      action: 'watch',
+      action,
       evidence: v.evidence,
       reason: v.reason,
       confidence: picked.confidence,
       metrics: metricsFromVerdict(v.metrics, picked.confidence),
     },
     scopes: scoped.map(scopeFromEval),
-    signals: picked.notes.length > 0 ? picked.notes : undefined,
+    signals: [...picked.notes],
   };
+}
+
+function saveProfitStore(store: ProfitDealsStore): void {
+  mkdirSync(DATA_DIR, { recursive: true });
+  store.version = DEALS_STORE_VERSION;
+  store.updatedAt = new Date().toISOString();
+  writeFileSync(PROFIT_DEALS_FILE, JSON.stringify(store, null, 2), 'utf-8');
+}
+
+function saveRadarStore(store: RadarDealsStore): void {
+  mkdirSync(DATA_DIR, { recursive: true });
+  store.version = DEALS_STORE_VERSION;
+  store.updatedAt = new Date().toISOString();
+  writeFileSync(RADAR_DEALS_FILE, JSON.stringify(store, null, 2), 'utf-8');
 }
 
 function formatScopeEval(s: ScopedLotEvaluation): string {
@@ -569,27 +526,10 @@ function logSalingLotAnalysis(
   );
 }
 
-function upsertProfitDeal(
-  store: ProfitDealsStore,
-  record: ProfitDealRecord,
+function upsertAnalysisDeal(
+  store: ProfitDealsStore | RadarDealsStore,
+  record: SalingAnalysisRecord,
 ): boolean {
-  const idx = store.deals.findIndex((d) => d.listingId === record.listingId);
-  if (idx >= 0) {
-    const prev = store.deals[idx]!;
-    if (record.verdict.metrics.netMargin <= prev.verdict.metrics.netMargin) {
-      return false;
-    }
-    store.deals[idx] = record;
-    return true;
-  }
-  store.deals.unshift(record);
-  if (store.deals.length > MAX_RECORDS) {
-    store.deals.length = MAX_RECORDS;
-  }
-  return true;
-}
-
-function upsertRadarDeal(store: RadarDealsStore, record: RadarDealRecord): boolean {
   const idx = store.deals.findIndex((d) => d.listingId === record.listingId);
   if (idx >= 0) {
     const prev = store.deals[idx]!;
@@ -661,30 +601,33 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
     logSalingLotAnalysis(gift, collection, listingTon, scoped);
 
     const picked = pickPrimaryLotVerdict(scoped);
-    const buys = scoped.filter((s) => s.verdict.action === 'buy');
-    buyScopeHits += buys.length;
+    const buyScopeCount = scoped.filter(
+      (s) => s.verdict.action === 'buy',
+    ).length;
+    buyScopeHits += buyScopeCount;
     if (!picked) continue;
 
     const action = picked.evaluation.verdict.action;
     if (action !== 'buy' && action !== 'watch') continue;
 
+    const record = buildAnalysisRecord(
+      gift,
+      picked,
+      scoped,
+      feeRate,
+      ANALYSIS_DAYS,
+      buyScopeCount,
+    );
+
     if (action === 'buy') {
       buyLots++;
-      const record = giftToProfitRecord(gift, picked);
-      if (upsertProfitDeal(profitStore, record)) {
+      if (upsertAnalysisDeal(profitStore, record)) {
         profitAdded++;
         appendBuyCsvLog(gift, collection, listingTon);
       }
     } else if (action === 'watch') {
       watchLots++;
-      const record = giftToRadarRecord(
-        gift,
-        picked,
-        scoped,
-        feeRate,
-        ANALYSIS_DAYS,
-      );
-      if (upsertRadarDeal(radarStore, record)) radarAdded++;
+      if (upsertAnalysisDeal(radarStore, record)) radarAdded++;
     }
   }
 

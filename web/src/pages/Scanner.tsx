@@ -7,9 +7,8 @@ import {
   getRadarDeals,
 } from '@/api/client';
 import type {
-  RadarDealRecord,
   RadarDealsResponse,
-  SalingDealRecord,
+  SalingAnalysisRecord,
   SalingDealsResponse,
 } from '@/api/types';
 import ErrorBox from '@/components/ErrorBox';
@@ -47,11 +46,11 @@ function scopeLabel(scope: string): string {
   return map[scope] ?? scope;
 }
 
-function DealsTable({
+function AnalysisDealsTable({
   deals,
   kind,
 }: {
-  deals: SalingDealRecord[];
+  deals: SalingAnalysisRecord[];
   kind: 'buy' | 'watch';
 }) {
   if (deals.length === 0) {
@@ -59,83 +58,7 @@ function DealsTable({
       <p style={{ color: 'var(--text-dim)', margin: 0 }}>
         Пока пусто. Включи сканер saling в{' '}
         <Link to="/settings">настройках</Link> и дождись лотов с вердиктом{' '}
-        <code>{kind}</code> по узкому срезу.
-      </p>
-    );
-  }
-
-  return (
-    <div className="liquidity-table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Время</th>
-            <th>Коллекция / модель</th>
-            <th>Фон</th>
-            <th>Цена</th>
-            <th>Δ медиана</th>
-            <th>Маржа</th>
-            <th>Срез</th>
-            <th>n</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {deals.map((d) => (
-            <tr key={d.listingId}>
-              <td style={{ whiteSpace: 'nowrap', fontSize: 12 }}>
-                {fmtTime(d.detectedAt)}
-              </td>
-              <td>
-                <div>{d.collection}</div>
-                <div style={{ color: 'var(--text-dim)', fontSize: 12 }}>
-                  {d.model || '—'}
-                </div>
-                {d.signals && d.signals.length > 0 && (
-                  <div style={{ color: 'var(--text-dim)', fontSize: 11, marginTop: 4 }}>
-                    {d.signals.join(' · ')}
-                  </div>
-                )}
-              </td>
-              <td style={{ fontSize: 12 }}>{d.backdrop || '—'}</td>
-              <td>
-                <b>{d.priceTon.toFixed(3)}</b> TON
-              </td>
-              <td className={d.verdict.metrics.discountVsMedian >= 0 ? 'green' : 'red'}>
-                {pct(d.verdict.metrics.discountVsMedian)}
-              </td>
-              <td>{pct(d.verdict.metrics.netMargin)}</td>
-              <td style={{ fontSize: 12 }}>{scopeLabel(d.verdict.scope)}</td>
-              <td>
-                {d.verdict.metrics.samples}{' '}
-                {confidenceBadge(d.verdict.metrics.confidence)}
-              </td>
-              <td>
-                <a
-                  href={mrktGiftUrl(d.giftId)}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="nav-link"
-                  style={{ display: 'inline-block', padding: '4px 8px' }}
-                >
-                  MRKT
-                </a>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function RadarDealsTable({ deals }: { deals: RadarDealRecord[] }) {
-  if (deals.length === 0) {
-    return (
-      <p style={{ color: 'var(--text-dim)', margin: 0 }}>
-        Пока пусто. Включи сканер saling в{' '}
-        <Link to="/settings">настройках</Link> и дождись лотов с вердиктом{' '}
-        <code>watch</code>.
+        <code>{kind}</code>.
       </p>
     );
   }
@@ -173,7 +96,7 @@ function RadarDealsTable({ deals }: { deals: RadarDealRecord[] }) {
                     <div style={{ fontSize: 11, marginTop: 4, color: 'var(--text-dim)' }}>
                       {d.primary.reason}
                     </div>
-                    {d.signals && d.signals.length > 0 && (
+                    {d.signals.length > 0 && (
                       <div style={{ fontSize: 11, marginTop: 4 }}>
                         {d.signals.join(' · ')}
                       </div>
@@ -216,7 +139,10 @@ function RadarDealsTable({ deals }: { deals: RadarDealRecord[] }) {
                   <td colSpan={9} style={{ paddingTop: 0, paddingBottom: 16 }}>
                     <details>
                       <summary style={{ cursor: 'pointer', fontSize: 12 }}>
-                        Все срезы ({d.scopes.length}) · fee {pct(d.feeRate)}
+                        Все срезы ({d.scopes.length}) · buy-срезов {d.buyScopeCount} ·
+                        fee {pct(d.feeRate)} · пороги buy{' '}
+                        {pct(d.thresholds.buyMinDiscount)}/
+                        {pct(d.thresholds.buyMinMargin)}
                       </summary>
                       <table style={{ marginTop: 8, fontSize: 12 }}>
                         <thead>
@@ -320,8 +246,8 @@ export function Scanner() {
         4 среза анализа; в файл попадает <b>самый узкий</b> срез с ≥10 продаж за 7
         дней. <code>buy</code> — только в{' '}
         <code>profit-deals.json</code> (для авто-бая). <code>watch</code> — в{' '}
-        <code>radar-deals.json</code> (v3): полный разбор — итог + все срезы с метриками
-        (медиана, 7д/30д, маржа, evidence).
+        <code>profit-deals.json</code> и <code>radar-deals.json</code> (v4): один формат —
+        итог, все срезы с reason, пороги, signals.
       </p>
 
       <div className="card">
@@ -433,10 +359,10 @@ export function Scanner() {
         {activeQuery.isError && <ErrorBox error={activeQuery.error} />}
         {activeQuery.isLoading && <Loading />}
         {tab === 'radar' && radarQuery.data && (
-          <RadarDealsTable deals={radarQuery.data.deals} />
+          <AnalysisDealsTable deals={radarQuery.data.deals} kind="watch" />
         )}
         {tab === 'profit' && profitQuery.data && (
-          <DealsTable deals={profitQuery.data.deals} kind="buy" />
+          <AnalysisDealsTable deals={profitQuery.data.deals} kind="buy" />
         )}
       </div>
     </div>

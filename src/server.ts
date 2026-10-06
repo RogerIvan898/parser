@@ -325,6 +325,7 @@ api.get('/profit-deals', async (req, reply) => {
     const data = loadProfitDeals(limit);
     return reply.send({
       file: 'profit-deals.json',
+      version: data.version,
       updatedAt: data.updatedAt,
       total: data.count,
       deals: data.deals,
