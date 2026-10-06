@@ -223,7 +223,7 @@ export function Evaluate() {
                       <td>
                         <span className={`badge ${badge.cls}`}>{badge.text}</span>
                       </td>
-                      <td>{EVIDENCE_LABEL[ev] ?? ev || '—'}</td>
+                      <td>{EVIDENCE_LABEL[ev] ?? (ev || '—')}</td>
                       <td>{s.verdict.metrics.samples7 ?? s.verdict.metrics.samples}</td>
                       <td>{s.verdict.metrics.samples30 ?? '—'}</td>
                       <td>
