@@ -73,6 +73,12 @@ export interface StoredDealMetrics {
   trendAdjusted?: boolean;
   recentBelowBaseRatio?: number | null;
   baseReferencePrice?: number;
+  backdropMedian?: number | null;
+  backdropSamples7?: number | null;
+  backdropSamples30?: number | null;
+  backdropRatio?: number | null;
+  backdropAdjustment?: number | null;
+  backdropAdjustmentApplied?: boolean;
 }
 
 export interface StoredScopeVerdict {
@@ -245,6 +251,15 @@ function metricsFromRaw(
     trendAdjusted: metrics.trendAdjusted === true,
     recentBelowBaseRatio: optNumOrNull(metrics.recentBelowBaseRatio),
     baseReferencePrice: optNum(metrics.baseReferencePrice),
+    backdropMedian: optNumOrNull(metrics.backdropMedian),
+    backdropSamples7: optNumOrNull(metrics.backdropSamples7),
+    backdropSamples30: optNumOrNull(metrics.backdropSamples30),
+    backdropRatio: optNumOrNull(metrics.backdropRatio),
+    backdropAdjustment: optNumOrNull(metrics.backdropAdjustment),
+    backdropAdjustmentApplied:
+      metrics.backdropAdjustmentApplied === undefined
+        ? undefined
+        : metrics.backdropAdjustmentApplied === true,
   };
 }
 
@@ -274,6 +289,12 @@ function metricsFromVerdict(
     trendAdjusted: m.trendAdjusted,
     recentBelowBaseRatio: m.recentBelowBaseRatio,
     baseReferencePrice: m.baseReferencePrice,
+    backdropMedian: m.backdropMedian,
+    backdropSamples7: m.backdropSamples7,
+    backdropSamples30: m.backdropSamples30,
+    backdropRatio: m.backdropRatio,
+    backdropAdjustment: m.backdropAdjustment,
+    backdropAdjustmentApplied: m.backdropAdjustmentApplied,
   };
 }
 

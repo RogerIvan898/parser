@@ -75,10 +75,12 @@ export function Evaluate() {
     <div>
       <h1>Оценка лота</h1>
       <p style={{ color: 'var(--text-dim)', marginTop: 0, maxWidth: 720 }}>
-        Тот же разбор, что у сканера saling. Коллекция и модель считаются всегда.
-        Срезы по фону только для <b>Black</b> и <b>Onyx Black</b>: если у коллекции
-        с этим фоном ≥10 продаж, вердикт берётся оттуда, модель его не отменяет.
-        Остальные цвета пока не учитываются (остаются коллекция и модель).
+        Тот же разбор, что у сканера saling. Коллекция и модель считаются всегда,
+        срезы по фону — для любого цвета. При ≥10 продажах <b>модель+фон</b> задаёт
+        цену, при 5–9 только осторожно сдвигает медиану модели, меньше 5 продаж фон
+        цену не меняет. Для <b>Black</b> и <b>Onyx Black</b> по-прежнему: если у
+        коллекции с этим фоном ≥10 продаж, вердикт берётся от фона и модель его не
+        отменяет. Надёжный свежий рынок модели (3 дня) отменяет buy по всей коллекции.
         Окно 7 дней, при нехватке продаж на срезе смотрим 30. Комиссия из настроек.
       </p>
 
@@ -120,7 +122,7 @@ export function Evaluate() {
         <p style={{ color: 'var(--text-dim)', fontSize: 12, margin: '4px 0 0' }}>
           Срезы: коллекция, {model.trim() || 'модель'}
           {backdropTrim
-            ? `, фон ${backdropTrim}${backdropSlices ? ' (+ срезы по фону)' : ' (без срезов по фону)'}`
+            ? `, фон ${backdropTrim}${backdropSlices ? ' (премиальный)' : ''}`
             : ''}
           .
         </p>
@@ -186,6 +188,24 @@ export function Evaluate() {
                     value={`${(mutation.data.primary.metrics.netMargin * 100).toFixed(1)}%`}
                   />
                 </div>
+                {mutation.data.primary.metrics.backdropSamples7 != null && (
+                  <p style={{ color: 'var(--text-dim)', fontSize: 13, marginBottom: 0 }}>
+                    Фон: медиана{' '}
+                    {mutation.data.primary.metrics.backdropMedian != null
+                      ? `${mutation.data.primary.metrics.backdropMedian.toFixed(2)} TON`
+                      : '—'}
+                    {`, продаж 7д ${mutation.data.primary.metrics.backdropSamples7}`}
+                    {mutation.data.primary.metrics.backdropSamples30 != null
+                      ? `, 30д ${mutation.data.primary.metrics.backdropSamples30}`
+                      : ''}
+                    {mutation.data.primary.metrics.backdropRatio != null
+                      ? `, ratio ${mutation.data.primary.metrics.backdropRatio.toFixed(3)}`
+                      : ''}
+                    {mutation.data.primary.metrics.backdropAdjustmentApplied
+                      ? `, сдвиг ${((mutation.data.primary.metrics.backdropAdjustment ?? 0) * 100).toFixed(1)}%`
+                      : ', цену не сдвигал'}
+                  </p>
+                )}
               </>
             ) : (
               <>

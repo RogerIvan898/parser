@@ -81,6 +81,12 @@ export interface DealVerdict {
     trendAdjusted?: boolean;
     recentBelowBaseRatio?: number | null;
     baseReferencePrice?: number;
+    backdropMedian?: number | null;
+    backdropSamples7?: number | null;
+    backdropSamples30?: number | null;
+    backdropRatio?: number | null;
+    backdropAdjustment?: number | null;
+    backdropAdjustmentApplied?: boolean;
   };
 }
 
@@ -183,6 +189,12 @@ export interface SalingDealMetricsFull {
   trendAdjusted?: boolean;
   recentBelowBaseRatio?: number | null;
   baseReferencePrice?: number;
+  backdropMedian?: number | null;
+  backdropSamples7?: number | null;
+  backdropSamples30?: number | null;
+  backdropRatio?: number | null;
+  backdropAdjustment?: number | null;
+  backdropAdjustmentApplied?: boolean;
 }
 
 export interface SalingScopeVerdict {
