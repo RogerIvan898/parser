@@ -13,8 +13,8 @@ import type {
   Gift,
   SalingRequest,
   SalingResponse,
-  withoutLockedListings,
 } from './types.js';
+import { withoutLockedListings } from './types.js';
 import { ensureToken } from './auth.js';
 
 // ============================================================

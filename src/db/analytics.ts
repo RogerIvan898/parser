@@ -323,9 +323,11 @@ export const MIN_SAMPLES_TO_EVALUATE = 10;
 export const WEAK_SAMPLES = 5;
 /** Если за основное окно меньше 10 продаж — смотрим это окно как extended evidence. */
 export const EXTENDED_WINDOW_DAYS = 30;
-/** |median7−median30|/median30: до 15% норма, 15–30% осторожно, выше — 30д не ориентир. */
+/** |median7−median30|/median30: до 15% можно брать extended как итог, 15–30% только как справка, выше — 30д не ориентир. */
 export const PRICE_STABILITY_OK = 0.15;
 export const PRICE_STABILITY_MAX = 0.3;
+/** Extended buy требует запас сверх обычных порогов: 30д менее актуальны. */
+export const EXTENDED_BUY_EXTRA = 0.02;
 
 /**
  * Уверенность от размера выборки того окна, по которому считаем цену.
@@ -690,13 +692,6 @@ function priceStabilityRatio(
 
 type Confidence = StatsWithConfidence['confidence'];
 
-function shiftConfidence(c: Confidence, delta: number): Confidence {
-  const order: Confidence[] = ['low', 'medium', 'high'];
-  const i = order.indexOf(c);
-  const next = Math.max(0, Math.min(order.length - 1, i + delta));
-  return order[next]!;
-}
-
 /**
  * Вердикт одного среза.
  * Мало продаж — insufficient/weak, не skip: срез ничего не доказал.
@@ -809,7 +804,14 @@ export function decideFromSales(
   const { buyMinDiscount, buyMinMargin, watchMinDiscount } =
     getSalesVerdictThresholds();
   const iqr = iqrRatioOf(priced);
-  const priceOk = discount >= buyMinDiscount && margin >= buyMinMargin;
+  const regularBuy =
+    discount >= buyMinDiscount && margin >= buyMinMargin;
+  const extendedBuy =
+    discount >= buyMinDiscount + EXTENDED_BUY_EXTRA &&
+    margin >= buyMinMargin + EXTENDED_BUY_EXTRA;
+  const priceOk = evidence === 'extended' ? extendedBuy : regularBuy;
+  const extendedShort =
+    evidence === 'extended' && regularBuy && !extendedBuy;
 
   if (priceOk && iqr !== null && iqr > 0.5) {
     return {
@@ -841,11 +843,15 @@ export function decideFromSales(
     };
   }
   if (discount >= watchMinDiscount && margin > 0) {
+    const short =
+      extendedShort
+        ? `; для buy по 30д нужен запас +${Math.round(EXTENDED_BUY_EXTRA * 100)} п.п. к порогам`
+        : '';
     return {
       action: 'watch',
       evidence,
       scope: stats7.scope,
-      reason: `дисконт к медиане (${windowLabel}) ${pct}%, маржа после ${feePct}% — ${marginPct}%${stabilityNote}`,
+      reason: `дисконт к медиане (${windowLabel}) ${pct}%, маржа после ${feePct}% — ${marginPct}%${stabilityNote}${short}`,
       metrics,
     };
   }
@@ -945,12 +951,55 @@ function mostSpecific(items: ScopedLotEvaluation[]): ScopedLotEvaluation {
   );
 }
 
-function canPrice(s: ScopedLotEvaluation): boolean {
-  const e = s.verdict.evidence;
-  return (
-    (e === 'reliable' || e === 'extended') &&
-    s.verdict.action !== 'insufficient'
-  );
+/** Extended может быть итогом, только если 30д стабильны относительно 7д. */
+function extendedEligible(s: ScopedLotEvaluation): boolean {
+  if (s.verdict.evidence !== 'extended') return false;
+  if (s.verdict.action === 'insufficient') return false;
+  const n30 = s.verdict.metrics.samples30 ?? s.verdict.metrics.samples;
+  if (n30 < MIN_SAMPLES_TO_EVALUATE) return false;
+  const stab = s.verdict.metrics.priceStability;
+  if (stab != null && stab > PRICE_STABILITY_OK) return false;
+  return true;
+}
+
+function usableForPrimary(s: ScopedLotEvaluation): boolean {
+  if (s.verdict.action === 'insufficient') return false;
+  if (s.verdict.evidence === 'weak' || s.verdict.evidence === 'insufficient') {
+    return false;
+  }
+  if (s.verdict.evidence === 'reliable') return true;
+  return extendedEligible(s);
+}
+
+/**
+ * Сильный минус по модели (или более узкому надёжному срезу).
+ * «Около медианы» сюда не входит — фон может быть дороже модели.
+ */
+function strongNegative(
+  s: ScopedLotEvaluation,
+  chosen: ScopedLotEvaluation,
+): 'hard' | 'soft' | null {
+  if (s.verdict.evidence !== 'reliable' || s.verdict.action !== 'skip') {
+    return null;
+  }
+  const narrower = SCOPE_SPECIFICITY[s.scope] > SCOPE_SPECIFICITY[chosen.scope];
+  const modelAxis = s.scope === 'model' || s.scope === 'model+backdrop';
+  if (!narrower && !modelAxis) return null;
+  const { netMargin, discountVsMedian } = s.verdict.metrics;
+  if (netMargin <= -0.2 || discountVsMedian <= -0.2) return 'hard';
+  if (netMargin <= -0.1 || discountVsMedian <= -0.1) return 'soft';
+  return null;
+}
+
+function withAction(
+  s: ScopedLotEvaluation,
+  action: 'buy' | 'watch' | 'skip',
+  reason: string,
+): ScopedLotEvaluation {
+  return {
+    ...s,
+    verdict: { ...s.verdict, action, reason },
+  };
 }
 
 export interface PrimaryLotPick {
@@ -961,52 +1010,89 @@ export interface PrimaryLotPick {
 
 /**
  * Итог по лоту.
- * - reliable (7д ≥ 10) решает сам;
- * - model+backdrop, если он reliable, перекрывает оси;
- * - если пересечение не доказано, buy/watch любой надёжной оси сохраняется
- *   (редкий фон не глушится парой продаж модели);
- * - extended (30д) не перебивает reliable 7д, только двигает уверенность;
- * - insufficient/weak не бывают финальным skip.
+ * usable = reliable (7д ≥ 10) или extended (30д ≥ 10 и расхождение медиан ≤ 15%).
+ * Сначала buy, потом watch, потом skip. Внутри — самый узкий срез.
+ * insufficient / weak итог не выбирают.
+ * Надёжный сильный минус по модели снижает buy (до watch или skip).
  */
 export function pickPrimaryLotVerdict(
   scoped: ScopedLotEvaluation[],
 ): PrimaryLotPick | null {
-  const reliable = scoped.filter(
-    (s) => s.verdict.evidence === 'reliable' && canPrice(s),
-  );
-  const extended = scoped.filter((s) => s.verdict.evidence === 'extended');
+  const usable = scoped.filter(usableForPrimary);
+  if (usable.length === 0) return null;
 
-  let chosen: ScopedLotEvaluation | null = null;
-  if (reliable.length > 0) {
-    const combo = reliable.find((s) => s.scope === 'model+backdrop');
-    if (combo) {
-      chosen = combo;
-    } else {
-      const positive = reliable.filter(
-        (s) => s.verdict.action === 'buy' || s.verdict.action === 'watch',
-      );
-      chosen = mostSpecific(positive.length > 0 ? positive : reliable);
-    }
-  } else if (extended.length > 0) {
-    const positive = extended.filter(
-      (s) => s.verdict.action === 'buy' || s.verdict.action === 'watch',
-    );
-    chosen = mostSpecific(positive.length > 0 ? positive : extended);
-  }
-  if (!chosen) return null;
+  const buys = usable.filter((s) => s.verdict.action === 'buy');
+  const watches = usable.filter((s) => s.verdict.action === 'watch');
+  const skips = usable.filter((s) => s.verdict.action === 'skip');
+  const picked = buys.length
+    ? mostSpecific(buys)
+    : watches.length
+      ? mostSpecific(watches)
+      : mostSpecific(skips);
 
-  let delta = 0;
   const notes: string[] = [];
-  const shift = (dir: -1 | 1, note: string) => {
-    if (dir < 0 && delta > -1) delta += dir;
-    if (dir > 0 && delta < 1 && chosen.verdict.evidence !== 'extended') {
-      delta += dir;
+  let evaluation = picked;
+  let veto: 'hard' | 'soft' | null = null;
+
+  if (picked.verdict.action === 'buy') {
+    for (const s of scoped) {
+      if (s.scope === picked.scope) continue;
+      const level = strongNegative(s, picked);
+      if (level === 'hard') veto = 'hard';
+      else if (level === 'soft' && veto !== 'hard') veto = 'soft';
+      if (!level) continue;
+      const m = s.verdict.metrics;
+      notes.push(
+        `${scopeLabel(s.scope)} сильно ниже рынка лота: медиана ${m.referencePrice.toFixed(2)} TON, маржа ${Math.round(m.netMargin * 100)}%`,
+      );
     }
-    notes.push(note);
-  };
+    if (veto === 'hard') {
+      evaluation = withAction(
+        picked,
+        'skip',
+        `${picked.verdict.reason}; снижено до мимо: узкий срез с достаточной выборкой показывает сильный минус`,
+      );
+    } else if (veto === 'soft') {
+      evaluation = withAction(
+        picked,
+        'watch',
+        `${picked.verdict.reason}; снижено до смотреть: модель заметно дороже своего рынка`,
+      );
+    }
+  }
+
+  const action = evaluation.verdict.action;
+  const backdropPremium =
+    picked.scope === 'collection+backdrop' || picked.scope === 'model+backdrop';
+  if (backdropPremium && (action === 'buy' || action === 'watch') && !veto) {
+    const med = picked.verdict.metrics.referencePrice;
+    if (med > 0) {
+      notes.push(
+        `основной сигнал — фон: медиана ${scopeLabel(picked.scope)} ${med.toFixed(2)} TON`,
+      );
+    }
+  }
+
+  const modelSlice = scoped.find((s) => s.scope === 'model');
+  if (
+    modelSlice &&
+    modelSlice.scope !== picked.scope &&
+    modelSlice.verdict.evidence === 'reliable' &&
+    modelSlice.verdict.action === 'skip' &&
+    !veto &&
+    backdropPremium &&
+    (action === 'buy' || action === 'watch')
+  ) {
+    const med = modelSlice.verdict.metrics.referencePrice;
+    if (med > 0) {
+      notes.push(
+        `модель не подтверждает премию: медиана модели ${med.toFixed(2)} TON`,
+      );
+    }
+  }
 
   for (const s of scoped) {
-    if (s.scope === chosen.scope) continue;
+    if (s.scope === picked.scope) continue;
     const ev = s.verdict.evidence;
     const n7 = s.verdict.metrics.samples7 ?? s.verdict.metrics.samples;
     if (ev === 'insufficient' || ev === 'weak') {
@@ -1017,47 +1103,22 @@ export function pickPrimaryLotVerdict(
             ? 'слабая выборка'
             : 'мало данных';
       notes.push(`${scopeLabel(s.scope)} — ${kind} (${n7} за 7д)`);
-      const ref = s.verdict.metrics.referencePrice;
-      const price = s.verdict.metrics.listingPrice;
-      if (
-        n7 >= WEAK_SAMPLES &&
-        n7 < MIN_SAMPLES_TO_EVALUATE &&
-        ref > 0 &&
-        (chosen.verdict.action === 'buy' || chosen.verdict.action === 'watch')
-      ) {
-        const discount = (ref - price) / ref;
-        if (discount < -0.15) {
-          shift(
-            -1,
-            `${scopeLabel(s.scope)} дороже своей медианы — уверенность ниже`,
-          );
-        }
-      }
       continue;
     }
-    if (
-      ev === 'extended' &&
-      SCOPE_SPECIFICITY[s.scope] > SCOPE_SPECIFICITY[chosen.scope] &&
-      (chosen.verdict.action === 'buy' || chosen.verdict.action === 'watch') &&
-      s.verdict.action === 'skip'
-    ) {
-      shift(-1, `${scopeLabel(s.scope)} за 30д не подтверждает выгоду`);
-    } else if (
-      ev === 'extended' &&
-      chosen.verdict.evidence === 'reliable' &&
-      SCOPE_SPECIFICITY[s.scope] > SCOPE_SPECIFICITY[chosen.scope] &&
-      (s.verdict.action === 'buy' || s.verdict.action === 'watch') &&
-      (chosen.verdict.action === 'buy' || chosen.verdict.action === 'watch')
-    ) {
-      shift(
-        1,
-        `${scopeLabel(s.scope)} за 30д подтверждает (n=${s.verdict.metrics.samples})`,
+    if (ev === 'extended' && !extendedEligible(s)) {
+      const stab = s.verdict.metrics.priceStability;
+      const pct = stab != null ? Math.round(stab * 100) : null;
+      notes.push(
+        `${scopeLabel(s.scope)} за 30д не итог${pct != null ? ` (расхождение ${pct}%)` : ''}`,
       );
     }
   }
 
-  const confidence = shiftConfidence(chosen.verdict.metrics.confidence, delta);
-  return { evaluation: chosen, confidence, notes };
+  return {
+    evaluation,
+    confidence: evaluation.verdict.metrics.confidence,
+    notes,
+  };
 }
 
 export function analyzeLot(

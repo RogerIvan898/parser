@@ -1,4 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { resolve } from 'node:path';
 import {
   fetchSalingWithRetry,
@@ -24,6 +30,8 @@ import { DATA_DIR } from './store.js';
 
 export const PROFIT_DEALS_FILE = resolve(DATA_DIR, 'profit-deals.json');
 export const RADAR_DEALS_FILE = resolve(DATA_DIR, 'radar-deals.json');
+/** CSV: цена, коллекция, модель, фон, listing id — каждый новый buy в profit-deals */
+export const SALING_BUYS_CSV = resolve(DATA_DIR, 'saling-buys.csv');
 
 const ANALYSIS_DAYS = 7;
 const MAX_RECORDS = 400;
@@ -506,6 +514,39 @@ function formatScopeEval(s: ScopedLotEvaluation): string {
   return `${s.scope}=${s.verdict.action}/${ev}(Δ${d}% M${m}% n=${s.verdict.metrics.samples} ${win}д ${c} n7=${n7})`;
 }
 
+const SALING_BUYS_CSV_HEADER =
+  'price_ton,collection,model,backdrop,listing_id\n';
+
+function csvField(value: string): string {
+  if (/[",\n\r]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+}
+
+function appendBuyCsvLog(
+  gift: Gift,
+  collection: string,
+  priceTon: number,
+): void {
+  const model = gift.modelName || gift.modelTitle || '';
+  const backdrop = gift.backdropName?.trim() ?? '';
+  const listingId = gift.id || gift.giftIdString;
+  const line = [
+    priceTon.toFixed(3),
+    csvField(collection),
+    csvField(model),
+    csvField(backdrop),
+    csvField(listingId),
+  ].join(',');
+  mkdirSync(DATA_DIR, { recursive: true });
+  if (!existsSync(SALING_BUYS_CSV)) {
+    writeFileSync(SALING_BUYS_CSV, SALING_BUYS_CSV_HEADER, 'utf-8');
+  }
+  appendFileSync(SALING_BUYS_CSV, `${line}\n`, 'utf-8');
+  console.log(`[saling] buy,${line}`);
+}
+
 function logSalingLotAnalysis(
   gift: Gift,
   collection: string,
@@ -630,7 +671,10 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
     if (action === 'buy') {
       buyLots++;
       const record = giftToProfitRecord(gift, picked);
-      if (upsertProfitDeal(profitStore, record)) profitAdded++;
+      if (upsertProfitDeal(profitStore, record)) {
+        profitAdded++;
+        appendBuyCsvLog(gift, collection, listingTon);
+      }
     } else if (action === 'watch') {
       watchLots++;
       const record = giftToRadarRecord(
@@ -710,7 +754,7 @@ export async function runSalingScannerLoop(): Promise<void> {
       console.log(
         `[saling] сканер включён (лента новых лотов, ordering=None, count=20): ` +
           `~${SALING_SCANNER_INTERVAL_MS}ms ±${SALING_SCANNER_JITTER_MS}ms → ` +
-          `buy: ${PROFIT_DEALS_FILE}, watch: ${RADAR_DEALS_FILE}`,
+          `buy: ${PROFIT_DEALS_FILE} + ${SALING_BUYS_CSV}, watch: ${RADAR_DEALS_FILE}`,
       );
     }
     if (!on && wasOn) {
