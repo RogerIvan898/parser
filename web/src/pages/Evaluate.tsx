@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { decide, getParseConfig } from '@/api/client';
-import type { DealVerdict } from '@/api/types';
+import { analyzeLot, getParseConfig } from '@/api/client';
+import type { LotAnalysis } from '@/api/types';
 import CollectionModelSelect from '@/components/CollectionModelSelect';
 import BackdropSelect from '@/components/BackdropSelect';
 import ErrorBox from '@/components/ErrorBox';
@@ -9,14 +9,28 @@ import { useCatalog } from '@/hooks/useCatalog';
 import { useSettings } from '@/store/settings';
 
 const SCOPE_LABEL: Record<string, string> = {
-  collection: 'вся коллекция',
+  collection: 'коллекция',
   model: 'модель',
-  'model+backdrop': 'модель и фон',
-  'collection+backdrop': 'коллекция и фон',
+  'model+backdrop': 'модель + фон',
+  'collection+backdrop': 'коллекция + фон',
 };
 
+const EVIDENCE_LABEL: Record<string, string> = {
+  reliable: '7д, надёжно',
+  extended: '30д, расширенно',
+  weak: 'слабо, не само решает',
+  insufficient: 'мало данных',
+};
+
+function actionBadge(action: string) {
+  if (action === 'buy') return { cls: 'green', text: 'БРАТЬ' };
+  if (action === 'watch') return { cls: 'yellow', text: 'СМОТРЕТЬ' };
+  if (action === 'insufficient') return { cls: 'gray', text: 'МАЛО ДАННЫХ' };
+  return { cls: 'red', text: 'МИМО' };
+}
+
 export function Evaluate() {
-  const { defaultDays, defaultFeeRate } = useSettings();
+  const { defaultFeeRate } = useSettings();
   const parseCfg = useQuery({
     queryKey: ['parse-config'],
     queryFn: getParseConfig,
@@ -33,33 +47,35 @@ export function Evaluate() {
     const c = catalog.data.collections[0];
     if (!c) return;
     setCollection(c);
-    setModel('');
+    setModel(catalog.data.models[c]?.[0] ?? '');
   }, [catalog.data, collection]);
 
   useEffect(() => {
     setBackdrop('');
   }, [collection]);
 
-  const mutation = useMutation<DealVerdict, Error>({
+  const mutation = useMutation<LotAnalysis, Error>({
     mutationFn: () =>
-      decide({
+      analyzeLot({
         collection,
         model: model.trim() || null,
         backdrop: backdrop.trim() || null,
         price: Number(price),
-        days: defaultDays,
+        days: 7,
         feeRate,
       }),
   });
 
   const priceOk = typeof price === 'number' && price > 0;
+  const backdropOn = backdrop.trim().length > 0;
 
   return (
     <div>
       <h1>Оценка лота</h1>
-      <p style={{ color: 'var(--text-dim)', marginTop: 0 }}>
-        Цена сравнивается с продажами из истории. Без модели — по всей коллекции,
-        с моделью — только по ней, с фоном — ещё и по фону.
+      <p style={{ color: 'var(--text-dim)', marginTop: 0, maxWidth: 720 }}>
+        Тот же разбор, что у сканера saling. Коллекция и модель считаются всегда.
+        Если выбран фон — добавляются срезы «коллекция + фон» и «модель + фон».
+        Окно 7 дней, при нехватке продаж на срезе смотрим 30. Комиссия из настроек.
       </p>
 
       <div className="card">
@@ -69,7 +85,6 @@ export function Evaluate() {
             model={model}
             onCollectionChange={setCollection}
             onModelChange={setModel}
-            modelOptional
           />
           <BackdropSelect
             collection={collection}
@@ -93,69 +108,150 @@ export function Evaluate() {
           </div>
           <button
             onClick={() => mutation.mutate()}
-            disabled={mutation.isPending || !collection || !priceOk}
+            disabled={mutation.isPending || !collection || !model.trim() || !priceOk}
           >
             {mutation.isPending ? '...' : 'Оценить'}
           </button>
         </div>
+        <p style={{ color: 'var(--text-dim)', fontSize: 12, margin: '4px 0 0' }}>
+          Срезы: коллекция, {model.trim() || 'модель'}
+          {backdropOn ? `, фон ${backdrop.trim()} (ещё коллекция+фон и модель+фон)` : ''}.
+        </p>
       </div>
 
       {mutation.isError && <ErrorBox error={mutation.error} />}
 
       {mutation.data && (
-        <div className="card">
-          <h2>
-            Вердикт:{' '}
-            <span
-              className={`badge ${
-                mutation.data.action === 'buy'
-                  ? 'green'
-                  : mutation.data.action === 'watch'
-                  ? 'yellow'
-                  : 'red'
-              }`}
-            >
-              {mutation.data.action === 'buy'
-                ? 'БРАТЬ'
-                : mutation.data.action === 'watch'
-                ? 'СМОТРЕТЬ'
-                : 'МИМО'}
-            </span>
-          </h2>
-          <p style={{ color: 'var(--text-dim)' }}>{mutation.data.reason}</p>
-          {mutation.data.scope && (
-            <p style={{ color: 'var(--text-dim)', fontSize: 13 }}>
-              Срез: {SCOPE_LABEL[mutation.data.scope] ?? mutation.data.scope}
-            </p>
-          )}
-
-          <div className="card-row">
-            <Metric
-              label="Медиана продаж"
-              value={
-                mutation.data.metrics.referencePrice
-                  ? `${mutation.data.metrics.referencePrice.toFixed(2)} TON`
-                  : '—'
-              }
-            />
-            <Metric
-              label="К медиане"
-              value={`${(mutation.data.metrics.discountVsMedian * 100).toFixed(1)}%`}
-            />
-            <Metric
-              label="Продаж в выборке"
-              value={String(mutation.data.metrics.samples)}
-            />
-            <Metric
-              label="Продаж в день"
-              value={mutation.data.metrics.salesPerDay.toFixed(2)}
-            />
-            <Metric
-              label="Маржа после комиссии"
-              value={`${(mutation.data.metrics.netMargin * 100).toFixed(1)}%`}
-            />
+        <>
+          <div className="card">
+            {mutation.data.primary ? (
+              <>
+                <h2>
+                  Вердикт:{' '}
+                  <span
+                    className={`badge ${actionBadge(mutation.data.primary.action).cls}`}
+                  >
+                    {actionBadge(mutation.data.primary.action).text}
+                  </span>
+                </h2>
+                <p style={{ color: 'var(--text-dim)' }}>
+                  {mutation.data.primary.reason}
+                </p>
+                <p style={{ color: 'var(--text-dim)', fontSize: 13 }}>
+                  Основной срез:{' '}
+                  {SCOPE_LABEL[mutation.data.primary.scope] ??
+                    mutation.data.primary.scope}
+                  {' · '}
+                  {mutation.data.primary.evidence ?? '—'}
+                  {' · уверенность '}
+                  {mutation.data.primary.confidence}
+                </p>
+                {mutation.data.primary.notes.length > 0 && (
+                  <ul style={{ color: 'var(--text-dim)', fontSize: 13 }}>
+                    {mutation.data.primary.notes.map((n) => (
+                      <li key={n}>{n}</li>
+                    ))}
+                  </ul>
+                )}
+                <div className="card-row">
+                  <Metric
+                    label="Медиана продаж"
+                    value={
+                      mutation.data.primary.metrics.referencePrice
+                        ? `${mutation.data.primary.metrics.referencePrice.toFixed(2)} TON`
+                        : '—'
+                    }
+                  />
+                  <Metric
+                    label="К медиане"
+                    value={`${(mutation.data.primary.metrics.discountVsMedian * 100).toFixed(1)}%`}
+                  />
+                  <Metric
+                    label="Продаж в окне"
+                    value={String(mutation.data.primary.metrics.samples)}
+                  />
+                  <Metric
+                    label="Окно"
+                    value={`${mutation.data.primary.metrics.windowDays ?? 7} д`}
+                  />
+                  <Metric
+                    label="Маржа после комиссии"
+                    value={`${(mutation.data.primary.metrics.netMargin * 100).toFixed(1)}%`}
+                  />
+                </div>
+              </>
+            ) : (
+              <>
+                <h2>
+                  Вердикт: <span className="badge gray">МАЛО ДАННЫХ</span>
+                </h2>
+                <p style={{ color: 'var(--text-dim)' }}>
+                  Ни один срез не набрал надёжную или расширенную выборку. Это не
+                  отказ от лота — по имеющимся продажам оценку дать нельзя.
+                </p>
+              </>
+            )}
           </div>
-        </div>
+
+          <h2>По срезам</h2>
+          <div className="card liquidity-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Срез</th>
+                  <th>Действие</th>
+                  <th>Доказательство</th>
+                  <th>7д</th>
+                  <th>30д</th>
+                  <th>Медиана</th>
+                  <th>К медиане</th>
+                  <th>Маржа</th>
+                  <th>Уверенность</th>
+                </tr>
+              </thead>
+              <tbody>
+                {mutation.data.scopes.map((s) => {
+                  const badge = actionBadge(s.verdict.action);
+                  const ev = s.verdict.evidence ?? '';
+                  const isPrimary = mutation.data.primary?.scope === s.scope;
+                  return (
+                    <tr key={s.scope}>
+                      <td>
+                        {SCOPE_LABEL[s.scope] ?? s.scope}
+                        {isPrimary ? ' · итог' : ''}
+                      </td>
+                      <td>
+                        <span className={`badge ${badge.cls}`}>{badge.text}</span>
+                      </td>
+                      <td>{EVIDENCE_LABEL[ev] ?? ev || '—'}</td>
+                      <td>{s.verdict.metrics.samples7 ?? s.verdict.metrics.samples}</td>
+                      <td>{s.verdict.metrics.samples30 ?? '—'}</td>
+                      <td>
+                        {s.verdict.metrics.referencePrice
+                          ? `${s.verdict.metrics.referencePrice.toFixed(2)} (${s.verdict.metrics.windowDays ?? 7}д)`
+                          : '—'}
+                      </td>
+                      <td>
+                        {(s.verdict.metrics.discountVsMedian * 100).toFixed(1)}%
+                      </td>
+                      <td>
+                        {(s.verdict.metrics.netMargin * 100).toFixed(1)}%
+                      </td>
+                      <td>{s.verdict.metrics.confidence}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <ul style={{ color: 'var(--text-dim)', fontSize: 13, marginBottom: 0 }}>
+              {mutation.data.scopes.map((s) => (
+                <li key={`${s.scope}-reason`}>
+                  <b>{SCOPE_LABEL[s.scope] ?? s.scope}.</b> {s.verdict.reason}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </>
       )}
     </div>
   );

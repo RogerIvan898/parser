@@ -8,7 +8,8 @@ import type { Gift } from './types.js';
 import { nanoToTon } from './types.js';
 import {
   evaluateLotAllScopes,
-  pickVerdictWideToNarrow,
+  pickPrimaryLotVerdict,
+  type PrimaryLotPick,
   type ScopedLotEvaluation,
 } from './db/analytics.js';
 import {
@@ -21,6 +22,7 @@ import {
 import { DATA_DIR } from './store.js';
 
 export const PROFIT_DEALS_FILE = resolve(DATA_DIR, 'profit-deals.json');
+export const RADAR_DEALS_FILE = resolve(DATA_DIR, 'radar-deals.json');
 
 const ANALYSIS_DAYS = 7;
 const MAX_RECORDS = 400;
@@ -49,9 +51,11 @@ export interface ProfitDealRecord {
       confidence: string;
     };
   };
+  /** Соседние срезы, которые не стали вердиктом (мало данных, слабая выборка). */
+  signals?: string[];
 }
 
-interface ProfitDealsStore {
+interface DealsStore {
   version: 2;
   updatedAt: string;
   deals: ProfitDealRecord[];
@@ -68,12 +72,12 @@ function salingPauseMs(): number {
   return SALING_SCANNER_INTERVAL_MS + jitter;
 }
 
-function loadStore(): ProfitDealsStore {
-  if (!existsSync(PROFIT_DEALS_FILE)) {
+function loadStore(file: string): DealsStore {
+  if (!existsSync(file)) {
     return { version: 2, updatedAt: new Date().toISOString(), deals: [] };
   }
   try {
-    const raw = JSON.parse(readFileSync(PROFIT_DEALS_FILE, 'utf-8')) as {
+    const raw = JSON.parse(readFileSync(file, 'utf-8')) as {
       deals?: unknown[];
     };
     const deals = (Array.isArray(raw.deals) ? raw.deals : [])
@@ -132,23 +136,31 @@ function slimDealRecord(raw: unknown): ProfitDealRecord | null {
         confidence: String(metrics.confidence ?? 'low'),
       },
     },
+    signals: Array.isArray(o.signals)
+      ? o.signals.filter((s): s is string => typeof s === 'string')
+      : undefined,
   };
 }
 
-function saveStore(store: ProfitDealsStore): void {
+function saveStore(file: string, store: DealsStore): void {
   mkdirSync(DATA_DIR, { recursive: true });
   store.version = 2;
   store.updatedAt = new Date().toISOString();
-  writeFileSync(PROFIT_DEALS_FILE, JSON.stringify(store, null, 2), 'utf-8');
+  writeFileSync(file, JSON.stringify(store, null, 2), 'utf-8');
 }
 
 function giftToRecord(
   gift: Gift,
-  bestBuy: ScopedLotEvaluation,
+  picked: PrimaryLotPick,
 ): ProfitDealRecord {
   const collection = gift.collectionName || gift.collectionTitle || gift.title;
   const model = gift.modelName || gift.modelTitle || '';
-  const m = bestBuy.verdict.metrics;
+  const best = picked.evaluation;
+  const m = best.verdict.metrics;
+  const action = best.verdict.action;
+  if (action !== 'buy' && action !== 'watch') {
+    throw new Error('giftToRecord: только buy/watch');
+  }
 
   return {
     detectedAt: new Date().toISOString(),
@@ -159,24 +171,31 @@ function giftToRecord(
     backdrop: gift.backdropName ?? '',
     priceTon: nanoToTon(gift.salePrice),
     verdict: {
-      action: bestBuy.verdict.action,
-      scope: bestBuy.scope,
+      action,
+      scope: best.scope,
       metrics: {
         netMargin: m.netMargin,
         discountVsMedian: m.discountVsMedian,
         samples: m.samples,
-        confidence: m.confidence,
+        confidence: picked.confidence,
       },
     },
+    signals: picked.notes.length > 0 ? picked.notes : undefined,
   };
 }
 
 function formatScopeEval(s: ScopedLotEvaluation): string {
+  const n7 = s.verdict.metrics.samples7 ?? s.verdict.metrics.samples;
+  const ev = s.verdict.evidence ?? s.verdict.action;
+  if (s.verdict.action === 'insufficient') {
+    const n30 = s.verdict.metrics.samples30;
+    return `${s.scope}=${ev}(n7=${n7}${n30 != null ? ` n30=${n30}` : ''})`;
+  }
   const d = Math.round(s.verdict.metrics.discountVsMedian * 100);
   const m = Math.round(s.verdict.metrics.netMargin * 100);
-  const n = s.verdict.metrics.samples;
+  const win = s.verdict.metrics.windowDays ?? 7;
   const c = s.verdict.metrics.confidence;
-  return `${s.scope}=${s.verdict.action}(Δ${d}% M${m}% n=${n} ${c})`;
+  return `${s.scope}=${s.verdict.action}/${ev}(Δ${d}% M${m}% n=${s.verdict.metrics.samples} ${win}д ${c} n7=${n7})`;
 }
 
 function logSalingLotAnalysis(
@@ -188,10 +207,12 @@ function logSalingLotAnalysis(
   const model = gift.modelName || '—';
   const backdrop = gift.backdropName?.trim() || '—';
   const scopes = scoped.map(formatScopeEval).join(' | ');
-  const chosen = pickVerdictWideToNarrow(scoped);
-  const tail = chosen
-    ? `[вердикт: ${chosen.scope} ${chosen.verdict.action}]`
-    : '[вердикт: нет среза с достаточной выборкой]';
+  const picked = pickPrimaryLotVerdict(scoped);
+  const tail = picked
+    ? `[вердикт: ${picked.evaluation.scope} ${picked.evaluation.verdict.action} ${picked.confidence}` +
+      (picked.notes.length ? ` | ${picked.notes.join('; ')}` : '') +
+      ']'
+    : '[вердикт: нет надёжного среза]';
   console.log(
     `[saling] анализ ${collection} / ${model} / ${backdrop} #${gift.number} ` +
       `${listingTon.toFixed(3)} TON id=${(gift.id || gift.giftIdString).slice(0, 12)} → ${scopes} ` +
@@ -199,7 +220,7 @@ function logSalingLotAnalysis(
   );
 }
 
-function upsertDeal(store: ProfitDealsStore, record: ProfitDealRecord): boolean {
+function upsertDeal(store: DealsStore, record: ProfitDealRecord): boolean {
   const idx = store.deals.findIndex((d) => d.listingId === record.listingId);
   if (idx >= 0) {
     const prev = store.deals[idx]!;
@@ -223,12 +244,16 @@ export interface SalingScanStats {
   repeatVsPreviousScan: number;
   /** Прошли фильтр включённых коллекций */
   analyzed: number;
-  /** Лотов с хотя бы одним buy по любому срезу */
+  /** Финальный вердикт (узкий срез) = buy */
   buyLots: number;
   /** Сколько срезов дали buy (может быть > buyLots) */
   buyScopeHits: number;
-  added: number;
-  totalInFile: number;
+  /** Финальный вердикт = watch → radar-deals.json */
+  watchLots: number;
+  profitAdded: number;
+  radarAdded: number;
+  totalProfitInFile: number;
+  totalRadarInFile: number;
 }
 
 export async function scanSalingOnce(): Promise<SalingScanStats> {
@@ -239,11 +264,14 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
 
   const { newVsPrevious, repeatVsPrevious } = diffVsPreviousScan(res.gifts);
 
-  const store = loadStore();
-  let added = 0;
+  const profitStore = loadStore(PROFIT_DEALS_FILE);
+  const radarStore = loadStore(RADAR_DEALS_FILE);
+  let profitAdded = 0;
+  let radarAdded = 0;
   let analyzed = 0;
   let buyLots = 0;
   let buyScopeHits = 0;
+  let watchLots = 0;
   const feeRate = getParseFeeRate();
 
   for (const gift of res.gifts) {
@@ -263,17 +291,26 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
 
     logSalingLotAnalysis(gift, collection, listingTon, scoped);
 
-    const chosen = pickVerdictWideToNarrow(scoped);
+    const picked = pickPrimaryLotVerdict(scoped);
     const buys = scoped.filter((s) => s.verdict.action === 'buy');
     buyScopeHits += buys.length;
-    if (!chosen || chosen.verdict.action !== 'buy') continue;
+    if (!picked) continue;
 
-    buyLots++;
-    const record = giftToRecord(gift, chosen);
-    if (upsertDeal(store, record)) added++;
+    const action = picked.evaluation.verdict.action;
+    if (action !== 'buy' && action !== 'watch') continue;
+
+    const record = giftToRecord(gift, picked);
+    if (action === 'buy') {
+      buyLots++;
+      if (upsertDeal(profitStore, record)) profitAdded++;
+    } else if (action === 'watch') {
+      watchLots++;
+      if (upsertDeal(radarStore, record)) radarAdded++;
+    }
   }
 
-  if (added > 0) saveStore(store);
+  if (profitAdded > 0) saveStore(PROFIT_DEALS_FILE, profitStore);
+  if (radarAdded > 0) saveStore(RADAR_DEALS_FILE, radarStore);
 
   return {
     scanned: res.gifts.length,
@@ -282,13 +319,22 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
     analyzed,
     buyLots,
     buyScopeHits,
-    added,
-    totalInFile: store.deals.length,
+    watchLots,
+    profitAdded,
+    radarAdded,
+    totalProfitInFile: profitStore.deals.length,
+    totalRadarInFile: radarStore.deals.length,
   };
 }
 
-export function loadProfitDeals(limit = 100): ProfitDealsStore & { count: number } {
-  const store = loadStore();
+export function loadProfitDeals(limit = 100): DealsStore & { count: number } {
+  const store = loadStore(PROFIT_DEALS_FILE);
+  const deals = store.deals.slice(0, Math.max(1, Math.min(limit, MAX_RECORDS)));
+  return { ...store, deals, count: store.deals.length };
+}
+
+export function loadRadarDeals(limit = 100): DealsStore & { count: number } {
+  const store = loadStore(RADAR_DEALS_FILE);
   const deals = store.deals.slice(0, Math.max(1, Math.min(limit, MAX_RECORDS)));
   return { ...store, deals, count: store.deals.length };
 }
@@ -324,7 +370,8 @@ export async function runSalingScannerLoop(): Promise<void> {
       previousSalingListingIds = new Set();
       console.log(
         `[saling] сканер включён (лента новых лотов, ordering=None, count=20): ` +
-          `~${SALING_SCANNER_INTERVAL_MS}ms ±${SALING_SCANNER_JITTER_MS}ms → ${PROFIT_DEALS_FILE}`,
+          `~${SALING_SCANNER_INTERVAL_MS}ms ±${SALING_SCANNER_JITTER_MS}ms → ` +
+          `buy: ${PROFIT_DEALS_FILE}, watch: ${RADAR_DEALS_FILE}`,
       );
     }
     if (!on && wasOn) {
@@ -339,12 +386,15 @@ export async function runSalingScannerLoop(): Promise<void> {
 
     try {
       const s = await scanSalingOnce();
+      const fileBits: string[] = [];
+      if (s.profitAdded > 0) fileBits.push(`+${s.profitAdded} buy`);
+      if (s.radarAdded > 0) fileBits.push(`+${s.radarAdded} watch`);
       console.log(
         `[saling] лента ${s.scanned} → новых vs прошлый опрос: ${s.newVsPreviousScan}` +
           `, повтор: ${s.repeatVsPreviousScan}` +
-          ` | анализ ${s.analyzed}, buy лотов ${s.buyLots} (срезов ${s.buyScopeHits})` +
-          (s.added > 0 ? `, +${s.added} в JSON` : '') +
-          ` | в файле: ${s.totalInFile}`,
+          ` | анализ ${s.analyzed}, buy ${s.buyLots} (срезов ${s.buyScopeHits}), watch ${s.watchLots}` +
+          (fileBits.length ? ` | ${fileBits.join(', ')}` : '') +
+          ` | profit: ${s.totalProfitInFile}, radar: ${s.totalRadarInFile}`,
       );
     } catch (err) {
       console.error('[saling] ошибка запроса:', err);

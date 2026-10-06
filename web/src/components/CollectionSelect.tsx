@@ -44,16 +44,18 @@ export default function CollectionSelect({
     : null;
 
   return (
-    <ImageSelect
-      label={label}
-      value={value}
-      onChange={onChange}
-      options={options}
-      disabled={disabled || options.length === 0}
-      placeholder={options.length === 0 ? 'Нет каталога' : '—'}
-    />
-    {emptyHint ? (
-      <p className="form-hint" style={{ marginTop: 8 }}>{emptyHint}</p>
-    ) : null}
+    <>
+      <ImageSelect
+        label={label}
+        value={value}
+        onChange={onChange}
+        options={options}
+        disabled={disabled || options.length === 0}
+        placeholder={options.length === 0 ? 'Нет каталога' : '—'}
+      />
+      {emptyHint ? (
+        <p className="form-hint" style={{ marginTop: 8 }}>{emptyHint}</p>
+      ) : null}
+    </>
   );
 }

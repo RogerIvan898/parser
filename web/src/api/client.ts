@@ -181,6 +181,28 @@ export async function saveParseConfig(payload: {
   return data;
 }
 
+export async function getProfitDeals(limit = 80) {
+  const { data } = await api.get('/profit-deals', { params: { limit } });
+  return data;
+}
+
+export async function getRadarDeals(limit = 80) {
+  const { data } = await api.get('/radar-deals', { params: { limit } });
+  return data;
+}
+
+export async function analyzeLot(payload: {
+  collection: string;
+  model?: string | null;
+  backdrop?: string | null;
+  price: number;
+  days?: number;
+  feeRate?: number;
+}) {
+  const { data } = await api.post('/lot-analysis', payload);
+  return data;
+}
+
 export async function decide(payload: {
   collection: string;
   model?: string | null;

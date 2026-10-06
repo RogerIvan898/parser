@@ -55,7 +55,8 @@ export interface DealEvaluation {
 }
 
 export interface DealVerdict {
-  action: 'buy' | 'watch' | 'skip';
+  action: 'buy' | 'watch' | 'skip' | 'insufficient';
+  evidence?: 'insufficient' | 'weak' | 'extended' | 'reliable';
   reason: string;
   scope?: 'model+backdrop' | 'model' | 'collection' | 'collection+backdrop';
   metrics: {
@@ -68,7 +69,33 @@ export interface DealVerdict {
     netMargin: number;
     confidence: 'high' | 'medium' | 'low';
     samples: number;
+    windowDays?: number;
+    samples7?: number;
+    samples30?: number | null;
+    priceStability?: number | null;
   };
+}
+
+export interface LotAnalysisScope {
+  scope: 'model+backdrop' | 'model' | 'collection' | 'collection+backdrop';
+  model: string | null;
+  backdrop: string | null;
+  verdict: DealVerdict & {
+    scope: 'model+backdrop' | 'model' | 'collection' | 'collection+backdrop';
+  };
+}
+
+export interface LotAnalysis {
+  scopes: LotAnalysisScope[];
+  primary: {
+    scope: LotAnalysisScope['scope'];
+    action: 'buy' | 'watch' | 'skip' | 'insufficient';
+    evidence?: DealVerdict['evidence'];
+    confidence: 'high' | 'medium' | 'low';
+    reason: string;
+    notes: string[];
+    metrics: DealVerdict['metrics'];
+  } | null;
 }
 
 // ============================================================
@@ -120,4 +147,38 @@ export interface LiquidityResponse {
 
 export interface HealthResponse {
   ok: boolean;
+}
+
+// ============================================================
+// Saling scanner (profit / radar)
+// ============================================================
+
+export interface SalingDealVerdict {
+  action: 'buy' | 'watch' | 'skip';
+  scope: string;
+  metrics: {
+    netMargin: number;
+    discountVsMedian: number;
+    samples: number;
+    confidence: string;
+  };
+}
+
+export interface SalingDealRecord {
+  detectedAt: string;
+  listingId: string;
+  giftId: string;
+  collection: string;
+  model: string;
+  backdrop: string;
+  priceTon: number;
+  verdict: SalingDealVerdict;
+  signals?: string[];
+}
+
+export interface SalingDealsResponse {
+  file: string;
+  updatedAt: string;
+  total: number;
+  deals: SalingDealRecord[];
 }

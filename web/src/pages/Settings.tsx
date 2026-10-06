@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { getParseConfig, saveParseConfig } from '@/api/client';
 import ErrorBox from '@/components/ErrorBox';
@@ -245,17 +246,19 @@ export function Settings() {
             }}
           />
           <span className="parse-config-item__name">
-            Опрашивать <code>POST /gifts/saling</code> и писать выгодные лоты в{' '}
-            <code>data/profit-deals.json</code>
+            Опрашивать <code>POST /gifts/saling</code> и писать сигналы в{' '}
+            <code>data/profit-deals.json</code> (buy) и{' '}
+            <code>data/radar-deals.json</code> (watch)
           </span>
         </label>
         <p style={{ color: 'var(--text-dim)', fontSize: 13, margin: '8px 0 0' }}>
           Включено: история/модели — пауза <b>5 с</b>, saling — ~<b>3 с</b> ±{' '}
           <b>1 с</b>. Запрос без фильтров, <code>ordering: None</code>,{' '}
           <code>count: 20</code> — <b>недавно выставленные</b> лоты. По каждому —
-          4 среза (коллекция / модель / фон / модель+фон) как в «Оценке»; в JSON при{' '}
-          <code>buy</code> на любом срезе. Только отмеченные коллекции.{' '}
-          <code>GET /api/profit-deals</code>.
+          4 среза. Мало продаж на узком срезе — не отказ, а переход к более широкому
+          рынку (при &lt;10 за 7д смотрим 30д). <code>buy</code> → profit-deals,{' '}
+          <code>watch</code> → radar-deals. Только отмеченные коллекции. Смотри{' '}
+          <Link to="/scanner">Сканер / радар</Link>.
         </p>
       </div>
 

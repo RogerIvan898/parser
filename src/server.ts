@@ -18,6 +18,7 @@ import {
   evaluateListing,
   decide,
   decideFromSales,
+  analyzeLot,
   getSaleById,
 } from './db/analytics.js';
 import {
@@ -53,7 +54,7 @@ import {
   getSalesVerdictThresholds,
   DEFAULT_SALES_VERDICT_THRESHOLDS,
 } from './parse-config.js';
-import { loadProfitDeals } from './saling-scanner.js';
+import { loadProfitDeals, loadRadarDeals } from './saling-scanner.js';
 import { listLiquidItems } from './db/liquidity.js';
 import { ensureCatalogCollectionsFromApi } from './catalog-bootstrap.js';
 
@@ -333,6 +334,22 @@ api.get('/profit-deals', async (req, reply) => {
   }
 });
 
+api.get('/radar-deals', async (req, reply) => {
+  const q = req.query as Record<string, unknown>;
+  const limit = parsePositiveInt(q.limit, 50);
+  try {
+    const data = loadRadarDeals(limit);
+    return reply.send({
+      file: 'radar-deals.json',
+      updatedAt: data.updatedAt,
+      total: data.count,
+      deals: data.deals,
+    });
+  } catch (err) {
+    return reply.code(500).send({ error: (err as Error).message });
+  }
+});
+
 function parseMinConfidence(
   value: unknown,
 ): 'high' | 'medium' | 'low' | null {
@@ -501,6 +518,41 @@ api.post('/decide', async (req, reply) => {
 
   try {
     const result = decideFromSales(
+      collection,
+      model,
+      backdrop,
+      price,
+      days,
+      feeRate,
+    );
+    return reply.send(result);
+  } catch (err) {
+    req.log.error(err);
+    return reply.code(500).send({ error: (err as Error).message });
+  }
+});
+
+api.post('/lot-analysis', async (req, reply) => {
+  const body = req.body as DecideBody;
+  const collection = requireString(body.collection, 'collection');
+  const model =
+    body.model === null || body.model === undefined ? '' : String(body.model);
+  const price = body.price;
+  if (!collection) {
+    return reply.code(400).send({ error: 'collection обязателен' });
+  }
+  if (price === undefined || !Number.isFinite(price) || price <= 0) {
+    return reply.code(400).send({ error: 'price обязателен и должен быть > 0' });
+  }
+  const days = body.days !== undefined ? parsePositiveInt(body.days, 7) : 7;
+  const feeRate = parseFeeRate(body.feeRate);
+  const backdrop =
+    body.backdrop === null || body.backdrop === undefined
+      ? null
+      : String(body.backdrop);
+
+  try {
+    const result = analyzeLot(
       collection,
       model,
       backdrop,

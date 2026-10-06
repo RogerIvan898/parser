@@ -5,6 +5,7 @@ const links = [
   { to: '/stats', label: 'Статистика' },
   { to: '/evaluate', label: 'Оценка лота' },
   { to: '/liquidity', label: 'Ликвидность' },
+  { to: '/scanner', label: 'Сканер / радар' },
   { to: '/settings', label: 'Настройки' },
 ];
 

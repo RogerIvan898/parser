@@ -5,6 +5,7 @@ import { Evaluate } from './pages/Evaluate';
 import { Stats } from './pages/Stats';
 import { History } from './pages/History';
 import { Liquidity } from './pages/Liquidity';
+import { Scanner } from './pages/Scanner';
 
 export default function App() {
   return (
@@ -15,6 +16,7 @@ export default function App() {
         <Route path="/history" element={<History />} />
         <Route path="/evaluate" element={<Evaluate />} />
         <Route path="/liquidity" element={<Liquidity />} />
+        <Route path="/scanner" element={<Scanner />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/history" replace />} />
       </Route>
