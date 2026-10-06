@@ -13,6 +13,7 @@ import type {
   Gift,
   SalingRequest,
   SalingResponse,
+  withoutLockedListings,
 } from './types.js';
 import { ensureToken } from './auth.js';
 
@@ -298,7 +299,11 @@ export async function fetchSaling(
     signal,
   });
   if (!res.ok) await parseError(res);
-  return (await res.json()) as SalingResponse;
+  const data = (await res.json()) as SalingResponse;
+  return {
+    ...data,
+    gifts: withoutLockedListings(data.gifts ?? []),
+  };
 }
 
 export function fetchSalingWithRetry(

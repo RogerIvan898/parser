@@ -234,6 +234,15 @@ export interface SalingRequest {
   query: string | null;
 }
 
+/** Заблокированные лоты на MRKT не купить — не учитываем при парсинге saling. */
+export function isLockedListing(gift: Gift): boolean {
+  return gift.isLocked === true;
+}
+
+export function withoutLockedListings(gifts: Gift[]): Gift[] {
+  return gifts.filter((g) => !isLockedListing(g));
+}
+
 export interface SalingResponse {
   gifts: Gift[];
   cursor: string | null;
