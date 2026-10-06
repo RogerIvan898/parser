@@ -382,6 +382,11 @@ export const MIN_SAMPLES_FOR_TREND = 5;
 export const TREND_DOWN_THRESHOLD = -0.1;
 /** Доля продаж за 3д ниже медианы 7д, тоже включает защиту. */
 export const RECENT_BELOW_BASE_MIN = 0.75;
+/**
+ * Black / Onyx Black: если коллекция+фон ещё не набрала 10 продаж,
+ * модель+фон может задать цену уже от 3 продаж.
+ */
+export const PREMIUM_MODEL_BACKDROP_MIN = 3;
 
 /**
  * Уверенность от размера выборки того окна, по которому считаем цену.
@@ -1095,8 +1100,9 @@ function usableForPrimary(s: ScopedLotEvaluation): boolean {
 }
 
 /**
- * Сильный минус по модели (или более узкому надёжному срезу).
- * «Около медианы» сюда не входит — фон может быть дороже модели.
+ * Сильный минус по более узкому надёжному срезу.
+ * Обычная модель не отменяет срез с фоном: для Black / Onyx Black
+ * цена задаётся фоном, флор модели её не блокирует.
  */
 function strongNegative(
   s: ScopedLotEvaluation,
@@ -1105,9 +1111,13 @@ function strongNegative(
   if (s.verdict.evidence !== 'reliable' || s.verdict.action !== 'skip') {
     return null;
   }
+  const chosenBackdrop =
+    chosen.scope === 'collection+backdrop' || chosen.scope === 'model+backdrop';
+  if (chosenBackdrop && (s.scope === 'model' || s.scope === 'collection')) {
+    return null;
+  }
   const narrower = SCOPE_SPECIFICITY[s.scope] > SCOPE_SPECIFICITY[chosen.scope];
-  const modelAxis = s.scope === 'model' || s.scope === 'model+backdrop';
-  if (!narrower && !modelAxis) return null;
+  if (!narrower) return null;
   const { netMargin, discountVsMedian } = s.verdict.metrics;
   if (netMargin <= -0.2 || discountVsMedian <= -0.2) return 'hard';
   if (netMargin <= -0.1 || discountVsMedian <= -0.1) return 'soft';
@@ -1131,16 +1141,148 @@ export interface PrimaryLotPick {
   notes: string[];
 }
 
+function samples7of(s: ScopedLotEvaluation): number {
+  return s.verdict.metrics.samples7 ?? s.verdict.metrics.samples;
+}
+
+/** 7д ≥ 10, либо extended: за 30д уже ≥ 10 и срез сам стал ориентиром. */
+function premiumMarketSamples(s: ScopedLotEvaluation): number {
+  const n7 = samples7of(s);
+  if (n7 >= MIN_SAMPLES_TO_EVALUATE) return n7;
+  const n30 = s.verdict.metrics.samples30 ?? 0;
+  if (s.verdict.evidence === 'extended' && n30 >= MIN_SAMPLES_TO_EVALUATE) {
+    return n30;
+  }
+  return n7;
+}
+
+function priceActionFromMetrics(
+  s: ScopedLotEvaluation,
+): 'buy' | 'watch' | 'skip' | null {
+  const m = s.verdict.metrics;
+  const n = m.samples7 ?? m.samples;
+  if (!(m.referencePrice > 0) || n < 1) return null;
+  if (s.verdict.reason.includes('медиана ненадёжна')) return null;
+  const { buyMinDiscount, buyMinMargin, watchMinDiscount } =
+    getSalesVerdictThresholds();
+  const discount = m.discountVsMedian;
+  const margin = m.netMargin;
+  const extendedPrice =
+    s.verdict.evidence === 'extended' && !m.trendAdjusted;
+  const regularBuy = discount >= buyMinDiscount && margin >= buyMinMargin;
+  const extendedBuy =
+    discount >= buyMinDiscount + EXTENDED_BUY_EXTRA &&
+    margin >= buyMinMargin + EXTENDED_BUY_EXTRA;
+  if (extendedPrice ? extendedBuy : regularBuy) return 'buy';
+  if (discount >= watchMinDiscount && margin > 0) return 'watch';
+  return 'skip';
+}
+
+/**
+ * Тонкий фоновый срез (меньше 10 продаж) всё равно задаёт цену.
+ * Пороги buy/watch те же, confidence принудительно low.
+ */
+function promoteThinBackdropSlice(s: ScopedLotEvaluation): ScopedLotEvaluation {
+  let next = s;
+  if (s.verdict.action === 'insufficient') {
+    const action = priceActionFromMetrics(s);
+    if (action) {
+      next = withAction(
+        s,
+        action,
+        `${s.verdict.reason}; для премиального фона срез всё равно задаёт цену`,
+      );
+    }
+  }
+  if (next.verdict.metrics.confidence === 'low') return next;
+  return {
+    ...next,
+    verdict: {
+      ...next.verdict,
+      metrics: { ...next.verdict.metrics, confidence: 'low' },
+    },
+  };
+}
+
+/**
+ * Black / Onyx Black: носитель цены — фон, не флор модели.
+ * ≥10 продаж коллекция+фон → этот срез и есть вердикт.
+ * иначе ≥3 продаж модель+фон → он.
+ * иначе оба < 3 → коллекция+фон с confidence low.
+ */
+function pickPremiumBackdropVerdict(
+  scoped: ScopedLotEvaluation[],
+): PrimaryLotPick | null {
+  const collBd = scoped.find((s) => s.scope === 'collection+backdrop');
+  if (!collBd) return null;
+
+  const modelBd = scoped.find((s) => s.scope === 'model+backdrop');
+  const nColl = premiumMarketSamples(collBd);
+  const nModel = modelBd ? samples7of(modelBd) : 0;
+  const notes: string[] = [];
+
+  let evaluation: ScopedLotEvaluation;
+  if (nColl >= MIN_SAMPLES_TO_EVALUATE) {
+    evaluation = collBd;
+    notes.push(
+      `для этого фона рынок — коллекция+фон (${nColl} продаж), модель вердикт не задаёт и не отменяет`,
+    );
+  } else if (modelBd && nModel >= PREMIUM_MODEL_BACKDROP_MIN) {
+    evaluation =
+      nModel >= MIN_SAMPLES_TO_EVALUATE ? modelBd : promoteThinBackdropSlice(modelBd);
+    notes.push(
+      `коллекция+фон: ${nColl} продаж (< ${MIN_SAMPLES_TO_EVALUATE}), итог по модели+фон (${nModel})`,
+    );
+  } else {
+    evaluation = promoteThinBackdropSlice(collBd);
+    notes.push(
+      `мало продаж фона (коллекция+фон ${samples7of(collBd)}, модель+фон ${nModel}), confidence понижен`,
+    );
+  }
+
+  const modelSlice = scoped.find((s) => s.scope === 'model');
+  if (
+    modelSlice &&
+    evaluation.scope === 'collection+backdrop' &&
+    nColl >= MIN_SAMPLES_TO_EVALUATE
+  ) {
+    const med = modelSlice.verdict.metrics.referencePrice;
+    const n = samples7of(modelSlice);
+    if (med > 0) {
+      notes.push(
+        `модель справочно: медиана ${med.toFixed(2)} TON (${n} за 7д), buy не блокирует`,
+      );
+    }
+  }
+
+  const med = evaluation.verdict.metrics.referencePrice;
+  if (med > 0 && (evaluation.verdict.action === 'buy' || evaluation.verdict.action === 'watch')) {
+    notes.unshift(
+      `основной сигнал — фон: медиана ${scopeLabel(evaluation.scope)} ${med.toFixed(2)} TON`,
+    );
+  }
+
+  return {
+    evaluation,
+    confidence: evaluation.verdict.metrics.confidence,
+    notes,
+  };
+}
+
 /**
  * Итог по лоту.
- * usable = reliable (7д ≥ 10) или extended (30д ≥ 10 и расхождение медиан ≤ 15%).
+ * Для Black / Onyx Black primary задаёт фон (см. pickPremiumBackdropVerdict).
+ * Иначе usable = reliable (7д ≥ 10) или extended (30д ≥ 10 и расхождение медиан ≤ 15%).
  * Сначала buy, потом watch, потом skip. Внутри — самый узкий срез.
  * insufficient / weak итог не выбирают.
- * Надёжный сильный минус по модели снижает buy (до watch или skip).
+ * Надёжный сильный минус более узкого среза снижает buy. Модель не снижает buy по фону.
  */
 export function pickPrimaryLotVerdict(
   scoped: ScopedLotEvaluation[],
 ): PrimaryLotPick | null {
+  const premium = pickPremiumBackdropVerdict(scoped);
+  if (premium) return premium;
+
   const usable = scoped.filter(usableForPrimary);
   if (usable.length === 0) return null;
 
@@ -1180,36 +1322,6 @@ export function pickPrimaryLotVerdict(
         picked,
         'watch',
         `${picked.verdict.reason}; снижено до смотреть: модель заметно дороже своего рынка`,
-      );
-    }
-  }
-
-  const action = evaluation.verdict.action;
-  const backdropPremium =
-    picked.scope === 'collection+backdrop' || picked.scope === 'model+backdrop';
-  if (backdropPremium && (action === 'buy' || action === 'watch') && !veto) {
-    const med = picked.verdict.metrics.referencePrice;
-    if (med > 0) {
-      notes.push(
-        `основной сигнал — фон: медиана ${scopeLabel(picked.scope)} ${med.toFixed(2)} TON`,
-      );
-    }
-  }
-
-  const modelSlice = scoped.find((s) => s.scope === 'model');
-  if (
-    modelSlice &&
-    modelSlice.scope !== picked.scope &&
-    modelSlice.verdict.evidence === 'reliable' &&
-    modelSlice.verdict.action === 'skip' &&
-    !veto &&
-    backdropPremium &&
-    (action === 'buy' || action === 'watch')
-  ) {
-    const med = modelSlice.verdict.metrics.referencePrice;
-    if (med > 0) {
-      notes.push(
-        `модель не подтверждает премию: медиана модели ${med.toFixed(2)} TON`,
       );
     }
   }

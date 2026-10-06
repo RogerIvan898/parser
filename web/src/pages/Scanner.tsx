@@ -255,8 +255,8 @@ export function Scanner() {
       <h1>Сканер saling</h1>
       <p style={{ color: 'var(--text-dim)', marginTop: 0, maxWidth: 720 }}>
         Лента <code>POST /gifts/saling</code> (20 недавних лотов). По каждому лоту —
-        4 среза анализа; в файл попадает <b>самый узкий</b> срез с ≥10 продаж за 7
-        дней. <code>buy</code> — только в{' '}
+        4 среза. Для <b>Black</b> и <b>Onyx Black</b> цену задаёт фон: при ≥10
+        продажах коллекции с этим фоном модель вердикт не отменяет. <code>buy</code> — только в{' '}
         <code>profit-deals.json</code> (для авто-бая). <code>watch</code> — в{' '}
         <code>profit-deals.json</code> и <code>radar-deals.json</code> (v4): один формат —
         итог, все срезы с reason, пороги, signals.
