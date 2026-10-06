@@ -164,6 +164,32 @@ export interface SalingDealVerdict {
   };
 }
 
+export interface SalingDealMetricsFull {
+  listingPrice: number;
+  referencePrice: number;
+  floorPrice: number;
+  discountVsMedian: number;
+  discountVsFloor: number;
+  netMargin: number;
+  confidence: string;
+  samples: number;
+  salesPerDay: number;
+  windowDays?: number;
+  samples7?: number;
+  samples30?: number | null;
+  priceStability?: number | null;
+}
+
+export interface SalingScopeVerdict {
+  scope: string;
+  model: string | null;
+  backdrop: string | null;
+  action: string;
+  evidence?: string;
+  reason: string;
+  metrics: SalingDealMetricsFull;
+}
+
 export interface SalingDealRecord {
   detectedAt: string;
   listingId: string;
@@ -176,9 +202,40 @@ export interface SalingDealRecord {
   signals?: string[];
 }
 
+export interface RadarDealRecord {
+  detectedAt: string;
+  listingId: string;
+  giftId: string;
+  collection: string;
+  model: string;
+  backdrop: string;
+  priceTon: number;
+  analysisDays: number;
+  feeRate: number;
+  primary: {
+    scope: string;
+    action: 'watch';
+    evidence?: string;
+    reason: string;
+    confidence: string;
+    metrics: SalingDealMetricsFull;
+  };
+  scopes: SalingScopeVerdict[];
+  signals?: string[];
+}
+
 export interface SalingDealsResponse {
   file: string;
+  version?: number;
   updatedAt: string;
   total: number;
   deals: SalingDealRecord[];
+}
+
+export interface RadarDealsResponse {
+  file: string;
+  version?: number;
+  updatedAt: string;
+  total: number;
+  deals: RadarDealRecord[];
 }

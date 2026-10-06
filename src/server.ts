@@ -341,6 +341,7 @@ api.get('/radar-deals', async (req, reply) => {
     const data = loadRadarDeals(limit);
     return reply.send({
       file: 'radar-deals.json',
+      version: data.version,
       updatedAt: data.updatedAt,
       total: data.count,
       deals: data.deals,

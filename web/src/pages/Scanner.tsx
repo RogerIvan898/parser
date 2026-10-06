@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import {
@@ -6,7 +6,12 @@ import {
   getProfitDeals,
   getRadarDeals,
 } from '@/api/client';
-import type { SalingDealRecord, SalingDealsResponse } from '@/api/types';
+import type {
+  RadarDealRecord,
+  RadarDealsResponse,
+  SalingDealRecord,
+  SalingDealsResponse,
+} from '@/api/types';
 import ErrorBox from '@/components/ErrorBox';
 import Loading from '@/components/Loading';
 
@@ -124,8 +129,143 @@ function DealsTable({
   );
 }
 
+function RadarDealsTable({ deals }: { deals: RadarDealRecord[] }) {
+  if (deals.length === 0) {
+    return (
+      <p style={{ color: 'var(--text-dim)', margin: 0 }}>
+        Пока пусто. Включи сканер saling в{' '}
+        <Link to="/settings">настройках</Link> и дождись лотов с вердиктом{' '}
+        <code>watch</code>.
+      </p>
+    );
+  }
+
+  return (
+    <div className="liquidity-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Время</th>
+            <th>Лот / итог</th>
+            <th>Цена</th>
+            <th>Медиана</th>
+            <th>Δ</th>
+            <th>Маржа</th>
+            <th>Срез</th>
+            <th>7д / 30д</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {deals.map((d) => {
+            const m = d.primary.metrics;
+            return (
+              <Fragment key={d.listingId}>
+                <tr>
+                  <td style={{ whiteSpace: 'nowrap', fontSize: 12 }}>
+                    {fmtTime(d.detectedAt)}
+                  </td>
+                  <td>
+                    <div>{d.collection}</div>
+                    <div style={{ color: 'var(--text-dim)', fontSize: 12 }}>
+                      {d.model || '—'} · {d.backdrop || '—'}
+                    </div>
+                    <div style={{ fontSize: 11, marginTop: 4, color: 'var(--text-dim)' }}>
+                      {d.primary.reason}
+                    </div>
+                    {d.signals && d.signals.length > 0 && (
+                      <div style={{ fontSize: 11, marginTop: 4 }}>
+                        {d.signals.join(' · ')}
+                      </div>
+                    )}
+                  </td>
+                  <td>
+                    <b>{d.priceTon.toFixed(3)}</b> TON
+                  </td>
+                  <td style={{ fontSize: 12 }}>
+                    {m.referencePrice > 0
+                      ? `${m.referencePrice.toFixed(2)} (${m.windowDays ?? d.analysisDays}д)`
+                      : '—'}
+                  </td>
+                  <td className={m.discountVsMedian >= 0 ? 'green' : 'red'}>
+                    {pct(m.discountVsMedian)}
+                  </td>
+                  <td>{pct(m.netMargin)}</td>
+                  <td style={{ fontSize: 12 }}>
+                    {scopeLabel(d.primary.scope)}
+                    <br />
+                    {d.primary.evidence ?? '—'}{' '}
+                    {confidenceBadge(d.primary.confidence)}
+                  </td>
+                  <td style={{ fontSize: 12 }}>
+                    {m.samples7 ?? '—'} / {m.samples30 ?? '—'}
+                  </td>
+                  <td>
+                    <a
+                      href={mrktGiftUrl(d.giftId)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="nav-link"
+                      style={{ display: 'inline-block', padding: '4px 8px' }}
+                    >
+                      MRKT
+                    </a>
+                  </td>
+                </tr>
+                <tr>
+                  <td colSpan={9} style={{ paddingTop: 0, paddingBottom: 16 }}>
+                    <details>
+                      <summary style={{ cursor: 'pointer', fontSize: 12 }}>
+                        Все срезы ({d.scopes.length}) · fee {pct(d.feeRate)}
+                      </summary>
+                      <table style={{ marginTop: 8, fontSize: 12 }}>
+                        <thead>
+                          <tr>
+                            <th>Срез</th>
+                            <th>Действие</th>
+                            <th>Доказ.</th>
+                            <th>7д</th>
+                            <th>30д</th>
+                            <th>Медиана</th>
+                            <th>Δ</th>
+                            <th>Маржа</th>
+                            <th>пр/день</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {d.scopes.map((s) => (
+                            <tr key={s.scope}>
+                              <td>{scopeLabel(s.scope)}</td>
+                              <td>{s.action}</td>
+                              <td>{s.evidence ?? '—'}</td>
+                              <td>{s.metrics.samples7 ?? s.metrics.samples}</td>
+                              <td>{s.metrics.samples30 ?? '—'}</td>
+                              <td>
+                                {s.metrics.referencePrice > 0
+                                  ? s.metrics.referencePrice.toFixed(2)
+                                  : '—'}
+                              </td>
+                              <td>{pct(s.metrics.discountVsMedian)}</td>
+                              <td>{pct(s.metrics.netMargin)}</td>
+                              <td>{s.metrics.salesPerDay.toFixed(2)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </details>
+                  </td>
+                </tr>
+              </Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function collectionPulse(
-  deals: SalingDealRecord[],
+  deals: { collection: string; detectedAt: string }[],
   windowHours: number,
 ): { collection: string; count: number }[] {
   const since = Date.now() - windowHours * 60 * 60 * 1000;
@@ -158,7 +298,7 @@ export function Scanner() {
     refetchInterval: REFRESH_MS,
   });
 
-  const radarQuery = useQuery<SalingDealsResponse>({
+  const radarQuery = useQuery<RadarDealsResponse>({
     queryKey: ['radar-deals', limit],
     queryFn: () => getRadarDeals(limit),
     refetchInterval: REFRESH_MS,
@@ -180,8 +320,8 @@ export function Scanner() {
         4 среза анализа; в файл попадает <b>самый узкий</b> срез с ≥10 продаж за 7
         дней. <code>buy</code> — только в{' '}
         <code>profit-deals.json</code> (для авто-бая). <code>watch</code> — в{' '}
-        <code>radar-deals.json</code>: «чуть не дотянул» до buy, удобно для ручного
-        снайпинга и заметки всплесков по коллекциям.
+        <code>radar-deals.json</code> (v3): полный разбор — итог + все срезы с метриками
+        (медиана, 7д/30д, маржа, evidence).
       </p>
 
       <div className="card">
@@ -292,8 +432,11 @@ export function Scanner() {
 
         {activeQuery.isError && <ErrorBox error={activeQuery.error} />}
         {activeQuery.isLoading && <Loading />}
-        {activeQuery.data && (
-          <DealsTable deals={activeQuery.data.deals} kind={tab === 'radar' ? 'watch' : 'buy'} />
+        {tab === 'radar' && radarQuery.data && (
+          <RadarDealsTable deals={radarQuery.data.deals} />
+        )}
+        {tab === 'profit' && profitQuery.data && (
+          <DealsTable deals={profitQuery.data.deals} kind="buy" />
         )}
       </div>
     </div>

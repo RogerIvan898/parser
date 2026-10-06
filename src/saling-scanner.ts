@@ -9,6 +9,7 @@ import { nanoToTon } from './types.js';
 import {
   evaluateLotAllScopes,
   pickPrimaryLotVerdict,
+  type DealVerdict,
   type PrimaryLotPick,
   type ScopedLotEvaluation,
 } from './db/analytics.js';
@@ -55,10 +56,66 @@ export interface ProfitDealRecord {
   signals?: string[];
 }
 
-interface DealsStore {
+/** Полные метрики среза (как в decideFromSales / оценке в UI). */
+export interface StoredDealMetrics {
+  listingPrice: number;
+  referencePrice: number;
+  floorPrice: number;
+  discountVsMedian: number;
+  discountVsFloor: number;
+  netMargin: number;
+  confidence: string;
+  samples: number;
+  salesPerDay: number;
+  windowDays?: number;
+  samples7?: number;
+  samples30?: number | null;
+  priceStability?: number | null;
+}
+
+export interface StoredScopeVerdict {
+  scope: string;
+  model: string | null;
+  backdrop: string | null;
+  action: string;
+  evidence?: string;
+  reason: string;
+  metrics: StoredDealMetrics;
+}
+
+/** radar-deals.json v3 — весь разбор лота для ручного снайпинга. */
+export interface RadarDealRecord {
+  detectedAt: string;
+  listingId: string;
+  giftId: string;
+  collection: string;
+  model: string;
+  backdrop: string;
+  priceTon: number;
+  analysisDays: number;
+  feeRate: number;
+  primary: {
+    scope: string;
+    action: 'watch';
+    evidence?: string;
+    reason: string;
+    confidence: string;
+    metrics: StoredDealMetrics;
+  };
+  scopes: StoredScopeVerdict[];
+  signals?: string[];
+}
+
+interface ProfitDealsStore {
   version: 2;
   updatedAt: string;
   deals: ProfitDealRecord[];
+}
+
+interface RadarDealsStore {
+  version: 3;
+  updatedAt: string;
+  deals: RadarDealRecord[];
 }
 
 function sleep(ms: number): Promise<void> {
@@ -72,16 +129,16 @@ function salingPauseMs(): number {
   return SALING_SCANNER_INTERVAL_MS + jitter;
 }
 
-function loadStore(file: string): DealsStore {
-  if (!existsSync(file)) {
+function loadProfitStore(): ProfitDealsStore {
+  if (!existsSync(PROFIT_DEALS_FILE)) {
     return { version: 2, updatedAt: new Date().toISOString(), deals: [] };
   }
   try {
-    const raw = JSON.parse(readFileSync(file, 'utf-8')) as {
+    const raw = JSON.parse(readFileSync(PROFIT_DEALS_FILE, 'utf-8')) as {
       deals?: unknown[];
     };
     const deals = (Array.isArray(raw.deals) ? raw.deals : [])
-      .map((d) => slimDealRecord(d))
+      .map((d) => slimProfitDealRecord(d))
       .filter((d): d is ProfitDealRecord => d !== null);
     return {
       version: 2,
@@ -93,7 +150,216 @@ function loadStore(file: string): DealsStore {
   }
 }
 
-function slimDealRecord(raw: unknown): ProfitDealRecord | null {
+function loadRadarStore(): RadarDealsStore {
+  if (!existsSync(RADAR_DEALS_FILE)) {
+    return { version: 3, updatedAt: new Date().toISOString(), deals: [] };
+  }
+  try {
+    const raw = JSON.parse(readFileSync(RADAR_DEALS_FILE, 'utf-8')) as {
+      deals?: unknown[];
+    };
+    const deals = (Array.isArray(raw.deals) ? raw.deals : [])
+      .map((d) => parseRadarDealRecord(d))
+      .filter((d): d is RadarDealRecord => d !== null);
+    return {
+      version: 3,
+      updatedAt: new Date().toISOString(),
+      deals,
+    };
+  } catch {
+    return { version: 3, updatedAt: new Date().toISOString(), deals: [] };
+  }
+}
+
+function num(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function metricsFromRaw(
+  metrics: Record<string, unknown>,
+  confidenceOverride?: string,
+): StoredDealMetrics {
+  return {
+    listingPrice: num(metrics.listingPrice),
+    referencePrice: num(metrics.referencePrice),
+    floorPrice: num(metrics.floorPrice),
+    discountVsMedian: num(metrics.discountVsMedian),
+    discountVsFloor: num(metrics.discountVsFloor),
+    netMargin: num(metrics.netMargin),
+    confidence: confidenceOverride ?? String(metrics.confidence ?? 'low'),
+    samples: num(metrics.samples),
+    salesPerDay: num(metrics.salesPerDay),
+    windowDays:
+      metrics.windowDays !== undefined ? num(metrics.windowDays) : undefined,
+    samples7:
+      metrics.samples7 !== undefined ? num(metrics.samples7) : undefined,
+    samples30:
+      metrics.samples30 === null || metrics.samples30 === undefined
+        ? metrics.samples30 === null
+          ? null
+          : undefined
+        : num(metrics.samples30),
+    priceStability:
+      metrics.priceStability === null || metrics.priceStability === undefined
+        ? metrics.priceStability === null
+          ? null
+          : undefined
+        : num(metrics.priceStability),
+  };
+}
+
+function metricsFromVerdict(
+  m: DealVerdict['metrics'],
+  confidence: string,
+): StoredDealMetrics {
+  return {
+    listingPrice: m.listingPrice,
+    referencePrice: m.referencePrice,
+    floorPrice: m.floorPrice,
+    discountVsMedian: m.discountVsMedian,
+    discountVsFloor: m.discountVsFloor,
+    netMargin: m.netMargin,
+    confidence,
+    samples: m.samples,
+    salesPerDay: m.salesPerDay,
+    windowDays: m.windowDays,
+    samples7: m.samples7,
+    samples30: m.samples30,
+    priceStability: m.priceStability,
+  };
+}
+
+function scopeFromEval(s: ScopedLotEvaluation): StoredScopeVerdict {
+  return {
+    scope: s.scope,
+    model: s.model,
+    backdrop: s.backdrop,
+    action: s.verdict.action,
+    evidence: s.verdict.evidence,
+    reason: s.verdict.reason,
+    metrics: metricsFromVerdict(s.verdict.metrics, s.verdict.metrics.confidence),
+  };
+}
+
+function parseRadarDealRecord(raw: unknown): RadarDealRecord | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  if (typeof o.listingId !== 'string' || typeof o.giftId !== 'string') {
+    return null;
+  }
+
+  const primaryRaw = o.primary as Record<string, unknown> | undefined;
+  if (primaryRaw && typeof primaryRaw === 'object') {
+    const pm = primaryRaw.metrics as Record<string, unknown> | undefined;
+    if (!pm) return null;
+    const scopes: StoredScopeVerdict[] = Array.isArray(o.scopes)
+      ? o.scopes.flatMap((s) => {
+          if (!s || typeof s !== 'object') return [];
+          const row = s as Record<string, unknown>;
+          const sm = row.metrics as Record<string, unknown> | undefined;
+          if (!sm || typeof row.scope !== 'string') return [];
+          const out: StoredScopeVerdict = {
+            scope: row.scope,
+            model:
+              row.model === null || typeof row.model === 'string'
+                ? row.model
+                : null,
+            backdrop:
+              row.backdrop === null || typeof row.backdrop === 'string'
+                ? row.backdrop
+                : null,
+            action: String(row.action ?? 'skip'),
+            reason: String(row.reason ?? ''),
+            metrics: metricsFromRaw(sm),
+          };
+          if (typeof row.evidence === 'string') {
+            out.evidence = row.evidence;
+          }
+          return [out];
+        })
+      : [];
+
+    return {
+      detectedAt:
+        typeof o.detectedAt === 'string'
+          ? o.detectedAt
+          : new Date().toISOString(),
+      listingId: o.listingId,
+      giftId: o.giftId,
+      collection: String(o.collection ?? ''),
+      model: String(o.model ?? ''),
+      backdrop: String(o.backdrop ?? ''),
+      priceTon: num(o.priceTon),
+      analysisDays: num(o.analysisDays) || ANALYSIS_DAYS,
+      feeRate: num(o.feeRate),
+      primary: {
+        scope: String(primaryRaw.scope ?? ''),
+        action: 'watch',
+        evidence:
+          typeof primaryRaw.evidence === 'string'
+            ? primaryRaw.evidence
+            : undefined,
+        reason: String(primaryRaw.reason ?? ''),
+        confidence: String(primaryRaw.confidence ?? pm.confidence ?? 'low'),
+        metrics: metricsFromRaw(
+          pm,
+          String(primaryRaw.confidence ?? pm.confidence ?? 'low'),
+        ),
+      },
+      scopes,
+      signals: Array.isArray(o.signals)
+        ? o.signals.filter((s): s is string => typeof s === 'string')
+        : undefined,
+    };
+  }
+
+  const slim = slimProfitDealRecord(raw);
+  if (!slim || slim.verdict.action !== 'watch') return null;
+  const m = slim.verdict.metrics;
+  const stubMetrics: StoredDealMetrics = {
+    listingPrice: slim.priceTon,
+    referencePrice: 0,
+    floorPrice: 0,
+    discountVsMedian: m.discountVsMedian,
+    discountVsFloor: 0,
+    netMargin: m.netMargin,
+    confidence: m.confidence,
+    samples: m.samples,
+    salesPerDay: 0,
+  };
+  return {
+    detectedAt: slim.detectedAt,
+    listingId: slim.listingId,
+    giftId: slim.giftId,
+    collection: slim.collection,
+    model: slim.model,
+    backdrop: slim.backdrop,
+    priceTon: slim.priceTon,
+    analysisDays: ANALYSIS_DAYS,
+    feeRate: 0,
+    primary: {
+      scope: slim.verdict.scope,
+      action: 'watch',
+      reason: '',
+      confidence: m.confidence,
+      metrics: stubMetrics,
+    },
+    scopes: [
+      {
+        scope: slim.verdict.scope,
+        model: slim.model || null,
+        backdrop: slim.backdrop || null,
+        action: 'watch',
+        reason: '',
+        metrics: stubMetrics,
+      },
+    ],
+    signals: slim.signals,
+  };
+}
+
+function slimProfitDealRecord(raw: unknown): ProfitDealRecord | null {
   if (!raw || typeof raw !== 'object') return null;
   const o = raw as Record<string, unknown>;
   const listingId = o.listingId;
@@ -142,14 +408,21 @@ function slimDealRecord(raw: unknown): ProfitDealRecord | null {
   };
 }
 
-function saveStore(file: string, store: DealsStore): void {
+function saveProfitStore(store: ProfitDealsStore): void {
   mkdirSync(DATA_DIR, { recursive: true });
   store.version = 2;
   store.updatedAt = new Date().toISOString();
-  writeFileSync(file, JSON.stringify(store, null, 2), 'utf-8');
+  writeFileSync(PROFIT_DEALS_FILE, JSON.stringify(store, null, 2), 'utf-8');
 }
 
-function giftToRecord(
+function saveRadarStore(store: RadarDealsStore): void {
+  mkdirSync(DATA_DIR, { recursive: true });
+  store.version = 3;
+  store.updatedAt = new Date().toISOString();
+  writeFileSync(RADAR_DEALS_FILE, JSON.stringify(store, null, 2), 'utf-8');
+}
+
+function giftToProfitRecord(
   gift: Gift,
   picked: PrimaryLotPick,
 ): ProfitDealRecord {
@@ -180,6 +453,41 @@ function giftToRecord(
         confidence: picked.confidence,
       },
     },
+    signals: picked.notes.length > 0 ? picked.notes : undefined,
+  };
+}
+
+function giftToRadarRecord(
+  gift: Gift,
+  picked: PrimaryLotPick,
+  scoped: ScopedLotEvaluation[],
+  feeRate: number,
+  analysisDays: number,
+): RadarDealRecord {
+  const collection = gift.collectionName || gift.collectionTitle || gift.title;
+  const model = gift.modelName || gift.modelTitle || '';
+  const best = picked.evaluation;
+  const v = best.verdict;
+
+  return {
+    detectedAt: new Date().toISOString(),
+    listingId: gift.id,
+    giftId: gift.giftIdString,
+    collection,
+    model,
+    backdrop: gift.backdropName ?? '',
+    priceTon: nanoToTon(gift.salePrice),
+    analysisDays,
+    feeRate,
+    primary: {
+      scope: best.scope,
+      action: 'watch',
+      evidence: v.evidence,
+      reason: v.reason,
+      confidence: picked.confidence,
+      metrics: metricsFromVerdict(v.metrics, picked.confidence),
+    },
+    scopes: scoped.map(scopeFromEval),
     signals: picked.notes.length > 0 ? picked.notes : undefined,
   };
 }
@@ -220,11 +528,31 @@ function logSalingLotAnalysis(
   );
 }
 
-function upsertDeal(store: DealsStore, record: ProfitDealRecord): boolean {
+function upsertProfitDeal(
+  store: ProfitDealsStore,
+  record: ProfitDealRecord,
+): boolean {
   const idx = store.deals.findIndex((d) => d.listingId === record.listingId);
   if (idx >= 0) {
     const prev = store.deals[idx]!;
     if (record.verdict.metrics.netMargin <= prev.verdict.metrics.netMargin) {
+      return false;
+    }
+    store.deals[idx] = record;
+    return true;
+  }
+  store.deals.unshift(record);
+  if (store.deals.length > MAX_RECORDS) {
+    store.deals.length = MAX_RECORDS;
+  }
+  return true;
+}
+
+function upsertRadarDeal(store: RadarDealsStore, record: RadarDealRecord): boolean {
+  const idx = store.deals.findIndex((d) => d.listingId === record.listingId);
+  if (idx >= 0) {
+    const prev = store.deals[idx]!;
+    if (record.primary.metrics.netMargin <= prev.primary.metrics.netMargin) {
       return false;
     }
     store.deals[idx] = record;
@@ -264,8 +592,8 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
 
   const { newVsPrevious, repeatVsPrevious } = diffVsPreviousScan(res.gifts);
 
-  const profitStore = loadStore(PROFIT_DEALS_FILE);
-  const radarStore = loadStore(RADAR_DEALS_FILE);
+  const profitStore = loadProfitStore();
+  const radarStore = loadRadarStore();
   let profitAdded = 0;
   let radarAdded = 0;
   let analyzed = 0;
@@ -299,18 +627,25 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
     const action = picked.evaluation.verdict.action;
     if (action !== 'buy' && action !== 'watch') continue;
 
-    const record = giftToRecord(gift, picked);
     if (action === 'buy') {
       buyLots++;
-      if (upsertDeal(profitStore, record)) profitAdded++;
+      const record = giftToProfitRecord(gift, picked);
+      if (upsertProfitDeal(profitStore, record)) profitAdded++;
     } else if (action === 'watch') {
       watchLots++;
-      if (upsertDeal(radarStore, record)) radarAdded++;
+      const record = giftToRadarRecord(
+        gift,
+        picked,
+        scoped,
+        feeRate,
+        ANALYSIS_DAYS,
+      );
+      if (upsertRadarDeal(radarStore, record)) radarAdded++;
     }
   }
 
-  if (profitAdded > 0) saveStore(PROFIT_DEALS_FILE, profitStore);
-  if (radarAdded > 0) saveStore(RADAR_DEALS_FILE, radarStore);
+  if (profitAdded > 0) saveProfitStore(profitStore);
+  if (radarAdded > 0) saveRadarStore(radarStore);
 
   return {
     scanned: res.gifts.length,
@@ -327,14 +662,18 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
   };
 }
 
-export function loadProfitDeals(limit = 100): DealsStore & { count: number } {
-  const store = loadStore(PROFIT_DEALS_FILE);
+export function loadProfitDeals(
+  limit = 100,
+): ProfitDealsStore & { count: number } {
+  const store = loadProfitStore();
   const deals = store.deals.slice(0, Math.max(1, Math.min(limit, MAX_RECORDS)));
   return { ...store, deals, count: store.deals.length };
 }
 
-export function loadRadarDeals(limit = 100): DealsStore & { count: number } {
-  const store = loadStore(RADAR_DEALS_FILE);
+export function loadRadarDeals(
+  limit = 100,
+): RadarDealsStore & { count: number } {
+  const store = loadRadarStore();
   const deals = store.deals.slice(0, Math.max(1, Math.min(limit, MAX_RECORDS)));
   return { ...store, deals, count: store.deals.length };
 }
