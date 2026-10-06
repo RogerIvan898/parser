@@ -8,6 +8,9 @@ import {
   initClient,
   fetchSalingWithRetry,
   makeDefaultSalingRequest,
+  fetchSalingByIdsWithRetry,
+  fetchBalanceWithRetry,
+  purchaseGiftsWithRetry,
 } from './client.js';
 import type { Gift } from './types.js';
 import { nanoToTon } from './types.js';
@@ -87,6 +90,33 @@ function requireString(
 ): string | null {
   if (typeof value !== 'string' || value.trim() === '') return null;
   return value.trim();
+}
+
+function parseListingIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const id = item.trim();
+    if (id) out.push(id);
+  }
+  return [...new Set(out)];
+}
+
+function parseNanoPrices(
+  value: unknown,
+): Record<string, number> | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) return null;
+  const out: Record<string, number> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    const id = key.trim();
+    if (!id) continue;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    out[id] = Math.floor(n);
+  }
+  return Object.keys(out).length > 0 ? out : null;
 }
 
 const app = Fastify({ logger: true });
@@ -590,6 +620,80 @@ api.get('/item/:id', async (req, reply) => {
   } catch (err) {
     req.log.error(err);
     return reply.code(500).send({ error: (err as Error).message });
+  }
+});
+
+api.get('/balance', async (req, reply) => {
+  try {
+    const balance = await fetchBalanceWithRetry({ retries: 2, timeoutMs: 15_000 });
+    return reply.send(balance);
+  } catch (err) {
+    req.log.error(err);
+    return reply.code(502).send({ error: (err as Error).message });
+  }
+});
+
+api.post('/gifts/saling/by-ids', async (req, reply) => {
+  const body = req.body as { ids?: unknown };
+  const ids = parseListingIds(body?.ids);
+  if (!ids.length) {
+    return reply.code(400).send({ error: 'ids: непустой массив UUID лотов' });
+  }
+  if (ids.length > 50) {
+    return reply.code(400).send({ error: 'ids: не больше 50 за запрос' });
+  }
+  try {
+    const gifts = await fetchSalingByIdsWithRetry(ids, {
+      retries: 2,
+      timeoutMs: 25_000,
+    });
+    return reply.send({ gifts });
+  } catch (err) {
+    req.log.error(err);
+    return reply.code(502).send({ error: (err as Error).message });
+  }
+});
+
+api.post('/gifts/buy', async (req, reply) => {
+  const body = req.body as {
+    ids?: unknown;
+    prices?: unknown;
+    maxPriceNano?: unknown;
+  };
+  const ids = parseListingIds(body?.ids);
+  if (!ids.length) {
+    return reply.code(400).send({ error: 'ids: непустой массив UUID лотов' });
+  }
+  if (ids.length > 20) {
+    return reply.code(400).send({ error: 'ids: не больше 20 за покупку' });
+  }
+  const prices = parseNanoPrices(body?.prices);
+  const maxPriceNano = parseNanoPrices(body?.maxPriceNano);
+  try {
+    const result = await purchaseGiftsWithRetry(ids, {
+      prices: prices ?? undefined,
+      maxPriceNano: maxPriceNano ?? undefined,
+      retries: 1,
+      timeoutMs: 35_000,
+    });
+    return reply.send({
+      listings: result.listings,
+      purchases: result.buy,
+      balanceBefore: result.balanceBefore,
+    });
+  } catch (err) {
+    const msg = (err as Error).message;
+    req.log.error(err);
+    const code = msg.includes('недостаточно hard')
+      ? 402
+      : msg.includes('не найдены') ||
+          msg.includes('не на продаже') ||
+          msg.includes('заблокирован')
+        ? 409
+        : msg.includes('выросла')
+          ? 409
+          : 502;
+    return reply.code(code).send({ error: msg });
   }
 });
 

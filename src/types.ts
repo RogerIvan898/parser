@@ -249,6 +249,27 @@ export interface SalingResponse {
   total: number;
 }
 
+export interface SalingByIdsRequest {
+  ids: string[];
+}
+
+/** POST /api/v1/gifts/buy */
+export interface BuyGiftsRequest {
+  ids: string[];
+  prices: Record<string, number>;
+}
+
+export interface BuyGiftResultItem {
+  type: string;
+  userGift: Gift;
+  price: number;
+  priceWithoutFee: number;
+  source: { type: string };
+  collectionName: string | null;
+  modelName: string | null;
+  backdropName: string | null;
+}
+
 // ============================================================
 // Feed (история событий)
 // ============================================================

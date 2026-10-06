@@ -13,6 +13,9 @@ import type {
   Gift,
   SalingRequest,
   SalingResponse,
+  SalingByIdsRequest,
+  BuyGiftsRequest,
+  BuyGiftResultItem,
 } from './types.js';
 import { withoutLockedListings } from './types.js';
 import { ensureToken } from './auth.js';
@@ -133,6 +136,26 @@ export function fetchBalanceWithRetry(
   opts: { retries?: number; timeoutMs?: number } = {},
 ): Promise<Balance> {
   return withRetry('balance', (signal) => fetchBalance(signal), opts);
+}
+
+/** Доступный TON для покупок на MRKT (nanoTON), поле `hard` из GET /balance. */
+export function spendableHardNano(balance: Balance): number {
+  const n = balance.hard;
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+export function assertSufficientHardBalance(
+  balance: Balance,
+  requiredNano: number,
+): void {
+  const available = spendableHardNano(balance);
+  const need = Math.floor(requiredNano);
+  if (need <= 0) return;
+  if (available < need) {
+    throw new Error(
+      `недостаточно hard: нужно ${need} nanoTON, доступно ${available} nanoTON`,
+    );
+  }
 }
 
 // ============================================================
@@ -311,6 +334,165 @@ export function fetchSalingWithRetry(
   opts: { retries?: number; timeoutMs?: number } = {},
 ): Promise<SalingResponse> {
   return withRetry('saling', (signal) => fetchSaling(body, signal), opts);
+}
+
+// ============================================================
+// POST /api/v1/gifts/saling/by-ids
+// ============================================================
+
+export async function fetchSalingByIds(
+  ids: string[],
+  signal?: AbortSignal,
+): Promise<Gift[]> {
+  const body: SalingByIdsRequest = { ids };
+  const res = await fetch(`${BASE_URL}/api/v1/gifts/saling/by-ids`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok) await parseError(res);
+  const data = (await res.json()) as Gift[];
+  return Array.isArray(data) ? data : [];
+}
+
+export function fetchSalingByIdsWithRetry(
+  ids: string[],
+  opts: { retries?: number; timeoutMs?: number } = {},
+): Promise<Gift[]> {
+  return withRetry('saling/by-ids', (signal) => fetchSalingByIds(ids, signal), opts);
+}
+
+// ============================================================
+// POST /api/v1/gifts/buy
+// ============================================================
+
+export async function buyGifts(
+  body: BuyGiftsRequest,
+  signal?: AbortSignal,
+): Promise<BuyGiftResultItem[]> {
+  const res = await fetch(`${BASE_URL}/api/v1/gifts/buy`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok) await parseError(res);
+  const data = (await res.json()) as BuyGiftResultItem[];
+  return Array.isArray(data) ? data : [];
+}
+
+export function buyGiftsWithRetry(
+  body: BuyGiftsRequest,
+  opts: { retries?: number; timeoutMs?: number } = {},
+): Promise<BuyGiftResultItem[]> {
+  return withRetry('gifts/buy', (signal) => buyGifts(body, signal), {
+    retries: opts.retries ?? 2,
+    timeoutMs: opts.timeoutMs ?? 25_000,
+  });
+}
+
+export interface PurchaseGiftsOptions {
+  /** nanoTON по id; если нет — берётся salePrice из by-ids */
+  prices?: Record<string, number>;
+  /** не покупать, если актуальная цена выше (nanoTON) */
+  maxPriceNano?: Record<string, number>;
+  /** false — не вызывать GET /balance (только для тестов) */
+  checkBalance?: boolean;
+  signal?: AbortSignal;
+}
+
+export interface PurchaseGiftsResult {
+  listings: Gift[];
+  buy: BuyGiftResultItem[];
+  balanceBefore: {
+    hard: number;
+    hardLocked: number;
+    totalHard: number;
+    requiredNano: number;
+  };
+}
+
+/**
+ * Сначала POST /gifts/saling/by-ids, затем POST /gifts/buy с актуальными ценами.
+ */
+export async function purchaseGifts(
+  ids: string[],
+  opts: PurchaseGiftsOptions = {},
+): Promise<PurchaseGiftsResult> {
+  const uniqueIds = [...new Set(ids.map((id) => id.trim()).filter(Boolean))];
+  if (uniqueIds.length === 0) {
+    throw new Error('ids пустой');
+  }
+
+  const listings = await fetchSalingByIds(uniqueIds, opts.signal);
+  const byId = new Map(listings.map((g) => [g.id, g]));
+  const missing = uniqueIds.filter((id) => !byId.has(id));
+  if (missing.length > 0) {
+    throw new Error(
+      `лоты не найдены или сняты с продажи: ${missing.join(', ')}`,
+    );
+  }
+
+  const prices: Record<string, number> = {};
+  for (const id of uniqueIds) {
+    const gift = byId.get(id)!;
+    if (gift.isLocked) {
+      throw new Error(`лот ${id} заблокирован (isLocked)`);
+    }
+    if (!gift.isOnSale) {
+      throw new Error(`лот ${id} не на продаже (isOnSale=false)`);
+    }
+    const price = opts.prices?.[id] ?? gift.salePrice;
+    if (!Number.isFinite(price) || price <= 0) {
+      throw new Error(`некорректная цена для ${id}`);
+    }
+    const max = opts.maxPriceNano?.[id];
+    if (max != null && gift.salePrice > max) {
+      throw new Error(
+        `цена лота ${id} выросла: ${gift.salePrice} > лимит ${max} nanoTON`,
+      );
+    }
+    prices[id] = Math.floor(price);
+  }
+
+  const requiredNano = uniqueIds.reduce((sum, id) => sum + prices[id], 0);
+  let balanceBefore: PurchaseGiftsResult['balanceBefore'] = {
+    hard: 0,
+    hardLocked: 0,
+    totalHard: 0,
+    requiredNano,
+  };
+
+  if (opts.checkBalance !== false) {
+    const balance = await fetchBalance(opts.signal);
+    balanceBefore = {
+      hard: spendableHardNano(balance),
+      hardLocked: Math.floor(balance.hardLocked) || 0,
+      totalHard: Math.floor(balance.totalHard) || 0,
+      requiredNano,
+    };
+    assertSufficientHardBalance(balance, requiredNano);
+  }
+
+  const buy = await buyGifts({ ids: uniqueIds, prices }, opts.signal);
+  return {
+    listings: uniqueIds.map((id) => byId.get(id)!),
+    buy,
+    balanceBefore,
+  };
+}
+
+export function purchaseGiftsWithRetry(
+  ids: string[],
+  opts: PurchaseGiftsOptions & { retries?: number; timeoutMs?: number } = {},
+): Promise<PurchaseGiftsResult> {
+  const { retries, timeoutMs, ...purchaseOpts } = opts;
+  return withRetry(
+    'purchase-gifts',
+    (signal) => purchaseGifts(ids, { ...purchaseOpts, signal }),
+    { retries: retries ?? 2, timeoutMs: timeoutMs ?? 30_000 },
+  );
 }
 
 /**
