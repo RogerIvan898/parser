@@ -29,8 +29,7 @@ import {
   isSalingScannerEnabled,
   isCollectionEnabledForParse,
   isBackdropEnabledForAnalysis,
-  SALING_SCANNER_INTERVAL_MS,
-  SALING_SCANNER_JITTER_MS,
+  getSalingScannerTiming,
   getParseFeeRate,
   getSalesVerdictThresholds,
 } from './parse-config.js';
@@ -195,10 +194,11 @@ function sleep(ms: number): Promise<void> {
 }
 
 function salingPauseMs(): number {
+  const { intervalMs, jitterMs } = getSalingScannerTiming();
+  if (jitterMs <= 0) return intervalMs;
   const jitter =
-    Math.floor(Math.random() * (SALING_SCANNER_JITTER_MS * 2 + 1)) -
-    SALING_SCANNER_JITTER_MS;
-  return SALING_SCANNER_INTERVAL_MS + jitter;
+    Math.floor(Math.random() * (jitterMs * 2 + 1)) - jitterMs;
+  return intervalMs + jitter;
 }
 
 function loadProfitStore(): ProfitDealsStore {
@@ -1102,9 +1102,10 @@ export async function runSalingScannerLoop(): Promise<void> {
     const on = isSalingScannerEnabled();
     if (on && !wasOn) {
       previousSalingListingIds = new Set();
+      const t = getSalingScannerTiming();
       console.log(
         `[saling] сканер включён (лента новых лотов, ordering=None, count=20): ` +
-          `~${SALING_SCANNER_INTERVAL_MS}ms ±${SALING_SCANNER_JITTER_MS}ms → ` +
+          `~${t.intervalMs}ms ±${t.jitterMs}ms → ` +
           `buy: ${PROFIT_DEALS_FILE} + ${SALING_BUYS_CSV}, watch: ${RADAR_DEALS_FILE}, ` +
           `вердикты: ${SALING_VERDICT_LOG}, покупки: ${SALING_PURCHASE_LOG}`,
       );

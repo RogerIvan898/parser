@@ -50,6 +50,9 @@ export function Settings() {
   const [localFeedPages, setLocalFeedPages] = useState('5');
   const [localHistoryRoundMs, setLocalHistoryRoundMs] = useState('1200');
   const [salingScannerEnabled, setSalingScannerEnabled] = useState(false);
+  const [localSalingIntervalMs, setLocalSalingIntervalMs] = useState('3000');
+  const [localSalingJitterMs, setLocalSalingJitterMs] = useState('1000');
+  const [localSalingModelDelayMs, setLocalSalingModelDelayMs] = useState('5000');
   const [buyDiscountPct, setBuyDiscountPct] = useState('8');
   const [buyMarginPct, setBuyMarginPct] = useState('4');
   const [watchDiscountPct, setWatchDiscountPct] = useState('4');
@@ -73,6 +76,12 @@ export function Settings() {
     setLocalFeedPages(String(parseQuery.data.parserFeedPages));
     setLocalHistoryRoundMs(String(parseQuery.data.parserHistoryRoundMs));
     setSalingScannerEnabled(parseQuery.data.salingScannerEnabled);
+    const st = parseQuery.data.salingScannerTiming;
+    if (st) {
+      setLocalSalingIntervalMs(String(st.intervalMs));
+      setLocalSalingJitterMs(String(st.jitterMs));
+      setLocalSalingModelDelayMs(String(st.modelDelayMs));
+    }
     const fee = parseQuery.data.feeRate ?? 0.02;
     setLocalFeePercent(String(feePercentFromRate(fee)));
     setDefaultFeeRate(fee);
@@ -129,6 +138,18 @@ export function Settings() {
       const buyMinDiscount = feeRateFromPercent(Number(buyDiscountPct) || 8);
       const buyMinMargin = feeRateFromPercent(Number(buyMarginPct) || 4);
       const watchMinDiscount = feeRateFromPercent(Number(watchDiscountPct) || 4);
+      const salingScannerIntervalMs = Math.min(
+        60_000,
+        Math.max(200, Math.floor(Number(localSalingIntervalMs) || 3000)),
+      );
+      const salingScannerJitterMs = Math.min(
+        30_000,
+        Math.max(0, Math.floor(Number(localSalingJitterMs) || 0)),
+      );
+      const salingScannerModelDelayMs = Math.min(
+        60_000,
+        Math.max(50, Math.floor(Number(localSalingModelDelayMs) || 5000)),
+      );
       await saveParseConfig({
         enabledCollections: [...checked].sort((a, b) =>
           a.localeCompare(b, 'ru'),
@@ -138,6 +159,9 @@ export function Settings() {
         parserFeedPages: feedPages,
         parserHistoryRoundMs: historyRoundMs,
         salingScannerEnabled,
+        salingScannerIntervalMs,
+        salingScannerJitterMs,
+        salingScannerModelDelayMs,
         feeRate,
         buyMinDiscount,
         buyMinMargin,
@@ -280,9 +304,58 @@ export function Settings() {
             <code>data/radar-deals.json</code> (watch)
           </span>
         </label>
+        <div className="form-row" style={{ marginTop: 12 }}>
+          <div className="form-field">
+            <label>Пауза между опросами ленты, мс</label>
+            <input
+              type="number"
+              min={200}
+              max={60000}
+              value={localSalingIntervalMs}
+              onChange={(e) => {
+                setParseDirty(true);
+                setLocalSalingIntervalMs(e.target.value);
+              }}
+            />
+          </div>
+          <div className="form-field">
+            <label>Разброс ±, мс (0 = ровно интервал)</label>
+            <input
+              type="number"
+              min={0}
+              max={30000}
+              value={localSalingJitterMs}
+              onChange={(e) => {
+                setParseDirty(true);
+                setLocalSalingJitterMs(e.target.value);
+              }}
+            />
+          </div>
+          <div className="form-field">
+            <label>Пауза каталога/history при сканере, мс</label>
+            <input
+              type="number"
+              min={50}
+              max={60000}
+              value={localSalingModelDelayMs}
+              onChange={(e) => {
+                setParseDirty(true);
+                setLocalSalingModelDelayMs(e.target.value);
+              }}
+            />
+          </div>
+        </div>
+        {parseQuery.data?.salingScannerEnvDefaults && (
+          <p style={{ color: 'var(--text-dim)', fontSize: 12, margin: '8px 0 0' }}>
+            Дефолты из env на сервере: лента{' '}
+            {parseQuery.data.salingScannerEnvDefaults.intervalMs} ±{' '}
+            {parseQuery.data.salingScannerEnvDefaults.jitterMs} мс, history{' '}
+            {parseQuery.data.salingScannerEnvDefaults.modelDelayMs} мс. Перезапуск не
+            нужен.
+          </p>
+        )}
         <p style={{ color: 'var(--text-dim)', fontSize: 13, margin: '8px 0 0' }}>
-          Включено: история/модели — пауза <b>5 с</b>, saling — ~<b>3 с</b> ±{' '}
-          <b>1 с</b>. Запрос без фильтров, <code>ordering: None</code>,{' '}
+          Запрос без фильтров, <code>ordering: None</code>,{' '}
           <code>count: 20</code> — <b>недавно выставленные</b> лоты. По каждому —
           4 среза. Обычный фон: коридор премии зависит от объёма 30д/7д, при полном
           сдвиге и ≥10 продажах модель+фон задаёт цену. Для Black и Onyx Black при ≥10 продажах

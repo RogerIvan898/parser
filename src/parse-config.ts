@@ -26,6 +26,10 @@ export interface ParseConfig {
   parserHistoryRoundMs: number | null;
   /** Параллельный опрос POST /gifts/saling и запись выгодных лотов в profit-deals.json */
   salingScannerEnabled: boolean;
+  /** null — env / дефолты (3 с, ±1 с, 5 с для history) */
+  salingScannerIntervalMs: number | null;
+  salingScannerJitterMs: number | null;
+  salingScannerModelDelayMs: number | null;
   /** Доля комиссии MRKT при перепродаже (0–1). null → DEFAULT_FEE_RATE */
   feeRate: number | null;
   /** Пороги decideFromSales (доли 0–1). null → DEFAULT_SALES_VERDICT_THRESHOLDS */
@@ -103,6 +107,12 @@ export const SALING_SCANNER_INTERVAL_MS = 3000;
 /** Случайный разброс ± jitter к интервалу saling */
 export const SALING_SCANNER_JITTER_MS = 1000;
 
+export interface SalingScannerTiming {
+  intervalMs: number;
+  jitterMs: number;
+  modelDelayMs: number;
+}
+
 /** Фоны для доп. запросов history (не весь catalog.json). */
 export const HISTORY_FEED_BACKDROP_NAMES = ['Black', 'Onyx Black'] as const;
 
@@ -129,6 +139,9 @@ function emptyConfig(): ParseConfig {
     parserFeedPages: null,
     parserHistoryRoundMs: null,
     salingScannerEnabled: false,
+    salingScannerIntervalMs: null,
+    salingScannerJitterMs: null,
+    salingScannerModelDelayMs: null,
     feeRate: null,
     buyMinDiscount: null,
     buyMinMargin: null,
@@ -207,9 +220,32 @@ export function isSalingScannerEnabled(): boolean {
   return loadParseConfig().salingScannerEnabled === true;
 }
 
-/** Пауза парсера моделей/history: в режиме saling фиксированно 5 с. */
+/** Дефолты saling-сканера из env (при старте контейнера). */
+export function getSalingScannerEnvDefaults(): SalingScannerTiming {
+  const intervalMs =
+    Number(process.env.SALING_SCANNER_INTERVAL_MS) || SALING_SCANNER_INTERVAL_MS;
+  const jitterMs =
+    Number(process.env.SALING_SCANNER_JITTER_MS) || SALING_SCANNER_JITTER_MS;
+  const modelDelayMs =
+    Number(process.env.SALING_SCANNER_MODEL_DELAY_MS) ||
+    SALING_SCANNER_MODEL_DELAY_MS;
+  return { intervalMs, jitterMs, modelDelayMs };
+}
+
+/** Актуальные интервалы saling: env + parse-config.json (читается на каждый sleep). */
+export function getSalingScannerTiming(): SalingScannerTiming {
+  const env = getSalingScannerEnvDefaults();
+  const cfg = loadParseConfig();
+  return {
+    intervalMs: cfg.salingScannerIntervalMs ?? env.intervalMs,
+    jitterMs: cfg.salingScannerJitterMs ?? env.jitterMs,
+    modelDelayMs: cfg.salingScannerModelDelayMs ?? env.modelDelayMs,
+  };
+}
+
+/** Пауза парсера моделей/history при включённом saling-сканере. */
 export function getEffectiveParserDelayMs(): number {
-  if (isSalingScannerEnabled()) return SALING_SCANNER_MODEL_DELAY_MS;
+  if (isSalingScannerEnabled()) return getSalingScannerTiming().modelDelayMs;
   return getParserTiming().delayMs;
 }
 
@@ -234,6 +270,21 @@ function normalizeConfig(raw: Partial<ParseConfig>): ParseConfig {
       3_600_000,
     ),
     salingScannerEnabled: raw.salingScannerEnabled === true,
+    salingScannerIntervalMs: parseOptionalPositiveInt(
+      raw.salingScannerIntervalMs,
+      200,
+      60_000,
+    ),
+    salingScannerJitterMs: parseOptionalPositiveInt(
+      raw.salingScannerJitterMs,
+      0,
+      30_000,
+    ),
+    salingScannerModelDelayMs: parseOptionalPositiveInt(
+      raw.salingScannerModelDelayMs,
+      50,
+      60_000,
+    ),
     feeRate: parseFeeRateConfig(raw.feeRate),
     buyMinDiscount: parseThresholdFraction(raw.buyMinDiscount),
     buyMinMargin: parseThresholdFraction(raw.buyMinMargin),
@@ -391,6 +442,9 @@ export interface SaveParseConfigInput {
   parserFeedPages?: number | null;
   parserHistoryRoundMs?: number | null;
   salingScannerEnabled?: boolean;
+  salingScannerIntervalMs?: number | null;
+  salingScannerJitterMs?: number | null;
+  salingScannerModelDelayMs?: number | null;
   feeRate?: number | null;
   buyMinDiscount?: number | null;
   buyMinMargin?: number | null;
@@ -428,6 +482,24 @@ export function saveParseConfig(input: SaveParseConfigInput): void {
   }
   if (input.salingScannerEnabled !== undefined) {
     next.salingScannerEnabled = Boolean(input.salingScannerEnabled);
+  }
+  if (input.salingScannerIntervalMs !== undefined) {
+    next.salingScannerIntervalMs =
+      input.salingScannerIntervalMs === null
+        ? null
+        : parseOptionalPositiveInt(input.salingScannerIntervalMs, 200, 60_000);
+  }
+  if (input.salingScannerJitterMs !== undefined) {
+    next.salingScannerJitterMs =
+      input.salingScannerJitterMs === null
+        ? null
+        : parseOptionalPositiveInt(input.salingScannerJitterMs, 0, 30_000);
+  }
+  if (input.salingScannerModelDelayMs !== undefined) {
+    next.salingScannerModelDelayMs =
+      input.salingScannerModelDelayMs === null
+        ? null
+        : parseOptionalPositiveInt(input.salingScannerModelDelayMs, 50, 60_000);
   }
   if (input.feeRate !== undefined) {
     next.feeRate =

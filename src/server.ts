@@ -54,9 +54,9 @@ import {
   getParserTiming,
   getParserEnvDefaults,
   isSalingScannerEnabled,
-  SALING_SCANNER_MODEL_DELAY_MS,
-  SALING_SCANNER_INTERVAL_MS,
-  SALING_SCANNER_JITTER_MS,
+  getSalingScannerTiming,
+  getSalingScannerEnvDefaults,
+  getEffectiveParserDelayMs,
   getParseFeeRate,
   DEFAULT_FEE_RATE,
   getSalesVerdictThresholds,
@@ -251,13 +251,9 @@ api.get('/parse-config', async (_req, reply) => {
       parserHistoryRoundMs: timing.historyRoundMs,
       parserEnvDefaults: envDefaults,
       salingScannerEnabled: cfg.salingScannerEnabled,
-      salingScannerTiming: {
-        modelDelayMs: cfg.salingScannerEnabled
-          ? SALING_SCANNER_MODEL_DELAY_MS
-          : timing.delayMs,
-        intervalMs: SALING_SCANNER_INTERVAL_MS,
-        jitterMs: SALING_SCANNER_JITTER_MS,
-      },
+      salingScannerTiming: getSalingScannerTiming(),
+      salingScannerEnvDefaults: getSalingScannerEnvDefaults(),
+      effectiveParserDelayMs: getEffectiveParserDelayMs(),
       feeRate: getParseFeeRate(),
       defaultFeeRate: DEFAULT_FEE_RATE,
       salesVerdictThresholds: getSalesVerdictThresholds(),
@@ -276,6 +272,9 @@ api.put('/parse-config', async (req, reply) => {
     parserFeedPages?: unknown;
     parserHistoryRoundMs?: unknown;
     salingScannerEnabled?: unknown;
+    salingScannerIntervalMs?: unknown;
+    salingScannerJitterMs?: unknown;
+    salingScannerModelDelayMs?: unknown;
     feeRate?: unknown;
     buyMinDiscount?: unknown;
     buyMinMargin?: unknown;
@@ -332,6 +331,34 @@ api.put('/parse-config', async (req, reply) => {
     body.salingScannerEnabled === undefined
       ? undefined
       : Boolean(body.salingScannerEnabled);
+  const salingScannerIntervalMs = parseNum(body.salingScannerIntervalMs, 200, 60_000);
+  const salingScannerJitterMs = parseNum(body.salingScannerJitterMs, 0, 30_000);
+  const salingScannerModelDelayMs = parseNum(
+    body.salingScannerModelDelayMs,
+    50,
+    60_000,
+  );
+  if (
+    body.salingScannerIntervalMs !== undefined &&
+    salingScannerIntervalMs === undefined &&
+    body.salingScannerIntervalMs !== null
+  ) {
+    return reply.code(400).send({ error: 'salingScannerIntervalMs: 200–60000' });
+  }
+  if (
+    body.salingScannerJitterMs !== undefined &&
+    salingScannerJitterMs === undefined &&
+    body.salingScannerJitterMs !== null
+  ) {
+    return reply.code(400).send({ error: 'salingScannerJitterMs: 0–30000' });
+  }
+  if (
+    body.salingScannerModelDelayMs !== undefined &&
+    salingScannerModelDelayMs === undefined &&
+    body.salingScannerModelDelayMs !== null
+  ) {
+    return reply.code(400).send({ error: 'salingScannerModelDelayMs: 50–60000' });
+  }
   let feeRateSave: number | null | undefined;
   if (body.feeRate !== undefined) {
     if (body.feeRate === null) {
@@ -373,6 +400,16 @@ api.put('/parse-config', async (req, reply) => {
       parserFeedPages,
       parserHistoryRoundMs,
       salingScannerEnabled,
+      salingScannerIntervalMs:
+        body.salingScannerIntervalMs === null
+          ? null
+          : salingScannerIntervalMs,
+      salingScannerJitterMs:
+        body.salingScannerJitterMs === null ? null : salingScannerJitterMs,
+      salingScannerModelDelayMs:
+        body.salingScannerModelDelayMs === null
+          ? null
+          : salingScannerModelDelayMs,
       feeRate: feeRateSave,
       buyMinDiscount,
       buyMinMargin,

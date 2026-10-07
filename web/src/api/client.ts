@@ -129,6 +129,12 @@ export interface ParseConfigResponse {
     intervalMs: number;
     jitterMs: number;
   };
+  salingScannerEnvDefaults?: {
+    modelDelayMs: number;
+    intervalMs: number;
+    jitterMs: number;
+  };
+  effectiveParserDelayMs?: number;
   feeRate: number;
   defaultFeeRate?: number;
   salesVerdictThresholds: SalesVerdictThresholdsResponse;
@@ -156,6 +162,8 @@ export async function getParseConfig(): Promise<ParseConfigResponse> {
     parserEnvDefaults: data.parserEnvDefaults,
     salingScannerEnabled: data.salingScannerEnabled === true,
     salingScannerTiming: data.salingScannerTiming,
+    salingScannerEnvDefaults: data.salingScannerEnvDefaults,
+    effectiveParserDelayMs: Number(data.effectiveParserDelayMs),
     feeRate: Number(data.feeRate) || 0.02,
     defaultFeeRate: Number(data.defaultFeeRate) || 0.02,
     salesVerdictThresholds: {
@@ -176,6 +184,9 @@ export async function saveParseConfig(payload: {
   parserFeedPages?: number;
   parserHistoryRoundMs?: number;
   salingScannerEnabled?: boolean;
+  salingScannerIntervalMs?: number;
+  salingScannerJitterMs?: number;
+  salingScannerModelDelayMs?: number;
   feeRate?: number;
   buyMinDiscount?: number;
   buyMinMargin?: number;
