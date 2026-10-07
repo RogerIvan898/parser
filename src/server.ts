@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Fastify, { type FastifyInstance } from 'fastify';
+import { Worker } from 'node:worker_threads';
 import fastifyStatic from '@fastify/static';
 import {
   initClient,
@@ -968,9 +969,9 @@ async function main(): Promise<void> {
     () => {
       console.log('[server] MRKT: токен OK');
       void runHostedParserLoop();
-      void import('./saling-scanner.js').then((m) => m.runSalingScannerLoop());
+      startSalingWorker();
       if (isSalingScannerEnabled()) {
-        console.log('[server] saling-сканер будет опрашивать маркет (настройки)');
+        console.log('[server] saling-сканер в отдельном потоке (настройки)');
       }
     },
     (err: unknown) => {
@@ -986,6 +987,43 @@ async function main(): Promise<void> {
 function parserAutostartDisabled(): boolean {
   const flag = process.env.PARSER_AUTOSTART?.trim().toLowerCase();
   return flag === '0' || flag === 'false' || flag === 'off';
+}
+
+function salingWorkerEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) env[key] = value;
+  }
+  env.MRKT_DB_ATTACH_ONLY = '1';
+  return env;
+}
+
+let salingWorkerGeneration = 0;
+
+/** Свой поток и свой цикл событий: синхронный history/sqlite его не ставит на паузу. */
+function startSalingWorker(): void {
+  const generation = ++salingWorkerGeneration;
+  const fromTs = import.meta.url.endsWith('.ts');
+  const worker = new Worker(
+    new URL(fromTs ? './saling-worker.ts' : './saling-worker.js', import.meta.url),
+    {
+      env: salingWorkerEnv(),
+      execArgv: fromTs ? ['--import', 'tsx'] : [],
+    },
+  );
+  console.log(`[server] saling-worker pid потока #${generation}`);
+  worker.on('error', (err) => {
+    console.error('[saling-worker] ошибка:', err);
+  });
+  worker.on('exit', (code) => {
+    if (generation !== salingWorkerGeneration) return;
+    console.error(
+      `[saling-worker] завершился (code=${code}), перезапуск через 5 с`,
+    );
+    setTimeout(() => {
+      if (generation === salingWorkerGeneration) startSalingWorker();
+    }, 5000);
+  });
 }
 
 function sleep(ms: number): Promise<void> {

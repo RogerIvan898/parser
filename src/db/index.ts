@@ -106,7 +106,9 @@ function prepareDatabaseFile(): void {
 }
 
 mkdirSync(dirname(DB_FILE), { recursive: true });
-prepareDatabaseFile();
+/** Воркер saling подключается к уже открытой базе и не гоняет пробу/VACUUM. */
+const attachOnly = process.env.MRKT_DB_ATTACH_ONLY === '1';
+if (!attachOnly) prepareDatabaseFile();
 
 const mem = process.memoryUsage();
 dbLog(
@@ -179,28 +181,32 @@ function slimSalesTable(): void {
   db.pragma('foreign_keys = ON');
 }
 
-if (!tableExists('sales') && tableExists('sales_slim')) {
-  db.exec('ALTER TABLE sales_slim RENAME TO sales');
-  db.exec(SALES_INDEXES);
-  dbLog('дособрал sales после оборванного сжатия');
-}
-
-db.exec(readFileSync(resolve(__dirname, 'schema.sql'), 'utf8'));
-slimSalesTable();
-if (tableExists('sales')) {
-  const cutoff = Math.floor(Date.now() / 1000) - 30 * 86400;
-  const removed = db
-    .prepare('DELETE FROM sales WHERE ts > 0 AND ts < ?')
-    .run(cutoff);
-  if (removed.changes > 0) {
-    dbLog(`sales старше 30д по дате сделки: −${removed.changes}`);
+if (attachOnly) {
+  dbLog('подключение без миграций (поток saling)');
+} else {
+  if (!tableExists('sales') && tableExists('sales_slim')) {
+    db.exec('ALTER TABLE sales_slim RENAME TO sales');
+    db.exec(SALES_INDEXES);
+    dbLog('дособрал sales после оборванного сжатия');
   }
+
+  db.exec(readFileSync(resolve(__dirname, 'schema.sql'), 'utf8'));
+  slimSalesTable();
+  if (tableExists('sales')) {
+    const cutoff = Math.floor(Date.now() / 1000) - 30 * 86400;
+    const removed = db
+      .prepare('DELETE FROM sales WHERE ts > 0 AND ts < ?')
+      .run(cutoff);
+    if (removed.changes > 0) {
+      dbLog(`sales старше 30д по дате сделки: −${removed.changes}`);
+    }
+  }
+  const freePages = db.pragma('freelist_count', { simple: true }) as number;
+  if (freePages >= 1000) {
+    db.pragma('cache_size = -8000');
+    dbLog(`vacuum mrkt.db: свободно ${freePages} страниц`);
+    db.exec('VACUUM');
+    dbLog('sales сжата');
+  }
+  dbLog('схема применена');
 }
-const freePages = db.pragma('freelist_count', { simple: true }) as number;
-if (freePages >= 1000) {
-  db.pragma('cache_size = -8000');
-  dbLog(`vacuum mrkt.db: свободно ${freePages} страниц`);
-  db.exec('VACUUM');
-  dbLog('sales сжата');
-}
-dbLog('схема применена');
