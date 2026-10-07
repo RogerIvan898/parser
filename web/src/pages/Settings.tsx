@@ -52,7 +52,6 @@ export function Settings() {
   const [salingScannerEnabled, setSalingScannerEnabled] = useState(false);
   const [localSalingIntervalMs, setLocalSalingIntervalMs] = useState('3000');
   const [localSalingJitterMs, setLocalSalingJitterMs] = useState('1000');
-  const [localSalingModelDelayMs, setLocalSalingModelDelayMs] = useState('5000');
   const [buyDiscountPct, setBuyDiscountPct] = useState('8');
   const [buyMarginPct, setBuyMarginPct] = useState('4');
   const [watchDiscountPct, setWatchDiscountPct] = useState('4');
@@ -80,7 +79,6 @@ export function Settings() {
     if (st) {
       setLocalSalingIntervalMs(String(st.intervalMs));
       setLocalSalingJitterMs(String(st.jitterMs));
-      setLocalSalingModelDelayMs(String(st.modelDelayMs));
     }
     const fee = parseQuery.data.feeRate ?? 0.02;
     setLocalFeePercent(String(feePercentFromRate(fee)));
@@ -146,10 +144,6 @@ export function Settings() {
         30_000,
         Math.max(0, Math.floor(Number(localSalingJitterMs) || 0)),
       );
-      const salingScannerModelDelayMs = Math.min(
-        60_000,
-        Math.max(50, Math.floor(Number(localSalingModelDelayMs) || 5000)),
-      );
       await saveParseConfig({
         enabledCollections: [...checked].sort((a, b) =>
           a.localeCompare(b, 'ru'),
@@ -161,7 +155,6 @@ export function Settings() {
         salingScannerEnabled,
         salingScannerIntervalMs,
         salingScannerJitterMs,
-        salingScannerModelDelayMs,
         feeRate,
         buyMinDiscount,
         buyMinMargin,
@@ -287,7 +280,16 @@ export function Settings() {
       </div>
 
       <div className="card">
-        <h2 style={{ marginTop: 0, fontSize: 16 }}>Сканер лотов (saling)</h2>
+        <h2 style={{ marginTop: 0, fontSize: 16 }}>Интервалы: saling и feed</h2>
+        <p style={{ color: 'var(--text-dim)', marginTop: 0 }}>
+          Два независимых потока на MRKT. Можно крутить сканер saling и{' '}
+          <code>parse --history</code> одновременно — паузы не подменяют друг
+          друга. Сохраняется в <code>parse-config.json</code>, перезапуск не нужен.
+        </p>
+
+        <h3 style={{ margin: '20px 0 8px', fontSize: 14, fontWeight: 600 }}>
+          Saling — лента <code>POST /gifts/saling</code>
+        </h3>
         <label className="parse-config-item parse-config-item--toggle">
           <input
             type="checkbox"
@@ -299,12 +301,11 @@ export function Settings() {
             }}
           />
           <span className="parse-config-item__name">
-            Опрашивать <code>POST /gifts/saling</code> и писать сигналы в{' '}
-            <code>data/profit-deals.json</code> (buy) и{' '}
-            <code>data/radar-deals.json</code> (watch)
+            Включить сканер (buy → profit-deals, watch → radar-deals).{' '}
+            <Link to="/scanner">Сканер / радар</Link>
           </span>
         </label>
-        <div className="form-row" style={{ marginTop: 12 }}>
+        <div className="form-row" style={{ marginTop: 8 }}>
           <div className="form-field">
             <label>Пауза между опросами ленты, мс</label>
             <input
@@ -331,48 +332,22 @@ export function Settings() {
               }}
             />
           </div>
-          <div className="form-field">
-            <label>Пауза каталога/history при сканере, мс</label>
-            <input
-              type="number"
-              min={50}
-              max={60000}
-              value={localSalingModelDelayMs}
-              onChange={(e) => {
-                setParseDirty(true);
-                setLocalSalingModelDelayMs(e.target.value);
-              }}
-            />
-          </div>
         </div>
         {parseQuery.data?.salingScannerEnvDefaults && (
-          <p style={{ color: 'var(--text-dim)', fontSize: 12, margin: '8px 0 0' }}>
-            Дефолты из env на сервере: лента{' '}
-            {parseQuery.data.salingScannerEnvDefaults.intervalMs} ±{' '}
-            {parseQuery.data.salingScannerEnvDefaults.jitterMs} мс, history{' '}
-            {parseQuery.data.salingScannerEnvDefaults.modelDelayMs} мс. Перезапуск не
-            нужен.
+          <p style={{ color: 'var(--text-dim)', fontSize: 12, margin: '4px 0 0' }}>
+            Env-дефолты saling: {parseQuery.data.salingScannerEnvDefaults.intervalMs}{' '}
+            ± {parseQuery.data.salingScannerEnvDefaults.jitterMs} мс (
+            <code>SALING_SCANNER_INTERVAL_MS</code>,{' '}
+            <code>SALING_SCANNER_JITTER_MS</code>).
           </p>
         )}
-        <p style={{ color: 'var(--text-dim)', fontSize: 13, margin: '8px 0 0' }}>
-          Запрос без фильтров, <code>ordering: None</code>,{' '}
-          <code>count: 20</code> — <b>недавно выставленные</b> лоты. По каждому —
-          4 среза. Обычный фон: коридор премии зависит от объёма 30д/7д, при полном
-          сдвиге и ≥10 продажах модель+фон задаёт цену. Для Black и Onyx Black при ≥10 продажах
-          коллекции с этим фоном вердикт идёт от фона, модель его не отменяет. На
-          срезах при &lt;10 за 7д смотрим 30д. Свежий рынок модели (3д) отменяет buy
-          коллекции. Если по продажам есть buy/watch — доп. запрос стакана{' '}
-          <code>POST /gifts/saling</code> по коллекции+модели+фону. <code>buy</code> → profit-deals,{' '}
-          <code>watch</code> → radar-deals. Только отмеченные коллекции. Смотри{' '}
-          <Link to="/scanner">Сканер / радар</Link>.
-        </p>
-      </div>
 
-      <div className="card">
-        <h2 style={{ marginTop: 0, fontSize: 16 }}>Скорость парсера</h2>
-        <p style={{ color: 'var(--text-dim)', marginTop: 0 }}>
-          Применяется между запросами каталога/history. Не действует, если
-          включён сканер saling (там фиксированно 5 с). Перезапуск не нужен.
+        <h3 style={{ margin: '24px 0 8px', fontSize: 14, fontWeight: 600 }}>
+          Feed — каталог и история <code>/feed</code>
+        </h3>
+        <p style={{ color: 'var(--text-dim)', fontSize: 13, margin: '0 0 8px' }}>
+          Для <code>npm run parse</code> и фонового сбора продаж в БД. Работает и
+          при включённом saling-сканере.
         </p>
         <div className="form-row">
           <div className="form-field">
@@ -417,10 +392,11 @@ export function Settings() {
         </div>
         {parseQuery.data?.parserEnvDefaults && (
           <p style={{ color: 'var(--text-dim)', fontSize: 12, marginBottom: 0 }}>
-            Дефолты из env на сервере: delay{' '}
-            {parseQuery.data.parserEnvDefaults.delayMs}, pages{' '}
-            {parseQuery.data.parserEnvDefaults.feedPages}, круг{' '}
-            {parseQuery.data.parserEnvDefaults.historyRoundMs} мс.
+            Env-дефолты feed: delay {parseQuery.data.parserEnvDefaults.delayMs},
+            pages {parseQuery.data.parserEnvDefaults.feedPages}, круг{' '}
+            {parseQuery.data.parserEnvDefaults.historyRoundMs} мс (
+            <code>PARSER_DELAY_MS</code>, <code>PARSER_FEED_PAGES</code>,{' '}
+            <code>PARSER_HISTORY_ROUND_MS</code>).
           </p>
         )}
       </div>

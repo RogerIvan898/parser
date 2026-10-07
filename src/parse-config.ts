@@ -243,9 +243,8 @@ export function getSalingScannerTiming(): SalingScannerTiming {
   };
 }
 
-/** Пауза парсера моделей/history при включённом saling-сканере. */
+/** Пауза между шагами каталога/history (не зависит от saling-сканера). */
 export function getEffectiveParserDelayMs(): number {
-  if (isSalingScannerEnabled()) return getSalingScannerTiming().modelDelayMs;
   return getParserTiming().delayMs;
 }
 
