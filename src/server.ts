@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -125,8 +126,51 @@ function parseNanoPrices(
 
 const app = Fastify({ logger: true });
 
+function adminToken(): string {
+  return process.env.ADMIN_TOKEN?.trim() ?? '';
+}
+
+function tokensMatch(got: string, expected: string): boolean {
+  const a = Buffer.from(got);
+  const b = Buffer.from(expected);
+  if (a.length === 0 || a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+function presentedAdminToken(headers: {
+  authorization?: string | string[];
+  'x-admin-token'?: string | string[];
+}): string {
+  const header = headers['x-admin-token'];
+  if (typeof header === 'string' && header.trim()) return header.trim();
+  const auth = headers.authorization;
+  if (typeof auth === 'string' && auth.toLowerCase().startsWith('bearer ')) {
+    return auth.slice(7).trim();
+  }
+  return '';
+}
+
 /** Только под /api — иначе GET /history, /stats … перехватывает API вместо SPA. */
 function registerApiRoutes(api: FastifyInstance): void {
+api.addHook('onRequest', async (req, reply) => {
+  const path = req.url.split('?')[0].replace(/^\/api(?=\/)/, '') || '/';
+  if (path === '/health') return;
+  const expected = adminToken();
+  const openBuy =
+    path === '/gifts/buy' || path === '/balance';
+  if (!expected) {
+    if (openBuy) {
+      return reply.code(401).send({
+        error: 'покупка закрыта: задайте ADMIN_TOKEN на сервере и введите его в настройках',
+      });
+    }
+    return;
+  }
+  if (!tokensMatch(presentedAdminToken(req.headers), expected)) {
+    return reply.code(401).send({ error: 'нужен пароль доступа' });
+  }
+});
+
 api.get('/health', async (_req, reply) => {
   return reply.send({ ok: true });
 });
@@ -866,6 +910,13 @@ async function main(): Promise<void> {
   }
 
   await app.listen({ port: PORT, host: '0.0.0.0' });
+  if (adminToken()) {
+    console.log('[server] API закрыт паролем ADMIN_TOKEN');
+  } else {
+    console.warn(
+      '[server] ADMIN_TOKEN не задан: покупка и баланс по HTTP закрыты, остальной API открыт',
+    );
+  }
   console.log(`[server] готов: http://0.0.0.0:${PORT}`);
 
   try {

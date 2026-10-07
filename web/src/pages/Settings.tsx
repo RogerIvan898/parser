@@ -22,8 +22,15 @@ function enabledSetFromApi(
 }
 
 export function Settings() {
-  const { defaultDays, defaultFeeRate, setDefaultDays, setDefaultFeeRate } =
-    useSettings();
+  const {
+    adminToken,
+    setAdminToken,
+    defaultDays,
+    defaultFeeRate,
+    setDefaultDays,
+    setDefaultFeeRate,
+  } = useSettings();
+  const [localAdminToken, setLocalAdminToken] = useState(adminToken);
 
   const catalog = useCatalog();
   const parseQuery = useQuery({
@@ -150,6 +157,28 @@ export function Settings() {
   return (
     <div>
       <h1>Настройки</h1>
+
+      <div className="card">
+        <h2 style={{ marginTop: 0, fontSize: 16 }}>Доступ</h2>
+        <p style={{ color: 'var(--text-dim)', marginTop: 0 }}>
+          Тот же пароль, что <code>ADMIN_TOKEN</code> на сервере. Без него чужой
+          не откроет баланс, настройки и покупку. В адресной строке его нет.
+        </p>
+        <div className="form-row">
+          <div className="form-field">
+            <label>Пароль доступа</label>
+            <input
+              type="password"
+              autoComplete="off"
+              value={localAdminToken}
+              onChange={(e) => setLocalAdminToken(e.target.value)}
+            />
+          </div>
+          <button type="button" onClick={() => setAdminToken(localAdminToken)}>
+            Запомнить в браузере
+          </button>
+        </div>
+      </div>
 
       <div className="card">
         <h2 style={{ marginTop: 0, fontSize: 16 }}>Оценка лота</h2>

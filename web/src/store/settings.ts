@@ -4,9 +4,12 @@ import { persist } from 'zustand/middleware';
 interface SettingsState {
   /** Для axios; задаётся через VITE_API_BASE, в UI не редактируется */
   apiBase: string;
+  /** Пароль доступа к API. Хранится только в этом браузере. */
+  adminToken: string;
   defaultDays: number;
   /** Доля комиссии 0–1 (в настройках показываем проценты) */
   defaultFeeRate: number;
+  setAdminToken: (v: string) => void;
   setDefaultDays: (v: number) => void;
   setDefaultFeeRate: (v: number) => void;
 }
@@ -15,8 +18,10 @@ export const useSettings = create<SettingsState>()(
   persist(
     (set) => ({
       apiBase: import.meta.env.VITE_API_BASE || '/api',
+      adminToken: '',
       defaultDays: 7,
       defaultFeeRate: 0.02,
+      setAdminToken: (v) => set({ adminToken: v.trim() }),
       setDefaultDays: (v) => set({ defaultDays: v }),
       setDefaultFeeRate: (v) => set({ defaultFeeRate: v }),
     }),

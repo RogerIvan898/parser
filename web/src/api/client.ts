@@ -7,8 +7,12 @@ export const api = axios.create({
 
 // Каждый раз подставляем актуальный apiBase из стора
 api.interceptors.request.use((config) => {
-  const base = useSettings.getState().apiBase || '/api';
-  config.baseURL = base;
+  const { apiBase, adminToken } = useSettings.getState();
+  config.baseURL = apiBase || '/api';
+  if (adminToken) {
+    config.headers = config.headers ?? {};
+    config.headers['x-admin-token'] = adminToken;
+  }
   return config;
 });
 
