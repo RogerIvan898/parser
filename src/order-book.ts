@@ -7,6 +7,7 @@ import {
   isPotentiallyProfitableScoped,
   type ActiveListing,
 } from './db/analytics.js';
+import { isBackdropEnabledForAnalysis } from './parse-config.js';
 import type { Gift } from './types.js';
 import { nanoToTon, withoutLockedListings } from './types.js';
 
@@ -44,7 +45,10 @@ function cacheKey(collection: string, model: string, backdrop: string): string {
   return `${collection}\0${model}\0${backdrop}`;
 }
 
-/** Стакан model+backdrop с MRKT. Кеш на один проход ленты, если передан. */
+/**
+ * Стакан с MRKT. Обычный фон не фильтруется: коллекция + модель.
+ * Black / Onyx Black — ещё и backdrop.
+ */
 export async function loadOrderBookListings(
   collection: string,
   model: string,
@@ -71,7 +75,8 @@ export async function loadOrderBookListings(
 
 /**
  * Тот же разбор, что у сканера: сначала продажи, и только при buy/watch
- * на каком-то срезе — POST /gifts/saling по коллекции, модели и фону.
+ * на каком-то срезе — POST /gifts/saling.
+ * Премиальный фон: коллекция + модель + фон. Обычный фон: коллекция + модель.
  */
 export async function analyzeLotWithLiveOrderBook(params: {
   collection: string;
@@ -123,10 +128,11 @@ export async function analyzeLotWithLiveOrderBook(params: {
   }
 
   try {
+    const bookBackdrop = isBackdropEnabledForAnalysis(backdrop) ? backdrop : '';
     const asks = await loadOrderBookListings(
       params.collection,
       model,
-      backdrop,
+      bookBackdrop,
       params.cache,
     );
     const exclude = params.excludeListingId?.trim();
@@ -143,7 +149,7 @@ export async function analyzeLotWithLiveOrderBook(params: {
     const prefix = params.logPrefix ?? '[lot]';
     console.log(
       `${prefix} стакан ${params.collection} / ${model}` +
-        `${backdrop ? ` / ${backdrop}` : ''} asks=${asks.length} used=${used.length}`,
+        `${bookBackdrop ? ` / ${bookBackdrop}` : ''} asks=${asks.length} used=${used.length}`,
     );
     return {
       ...analysis,

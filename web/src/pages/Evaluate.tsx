@@ -448,8 +448,8 @@ function downloadLotAnalysisLog(params: {
     generatedAt: new Date().toISOString(),
     pipeline: [
       'evaluateLotAllScopes → decideFromSales по каждому срезу',
-      'applyOrdinaryBackdropAdjustment (обычный фон)',
-      'pickPrimaryLotVerdict (премиум-фон / model+backdrop / collection+model)',
+      'обычный фон не входит в цену и не фильтрует стакан',
+      'pickPrimaryLotVerdict (премиум-фон, иначе модель, иначе коллекция)',
     ],
     input: {
       collection: params.collection,

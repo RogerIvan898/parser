@@ -445,11 +445,7 @@ export const BULLISH_HAIRCUT = 0.7;
  * модель+фон может задать цену уже от 3 продаж.
  */
 export const PREMIUM_MODEL_BACKDROP_MIN = 3;
-/**
- * Обычный фон: коридор и доля сдвига задаёт объём 30д/7д
- * (getBackdropAdjustmentConfig), не фиксированные 0.80–1.20.
- * Полный сдвиг (high) и ≥10 продаж за 7д — model+backdrop может быть primary.
- */
+/** Обычный фон в оценку цены не входит. Порог оставлен для совместимости логов. */
 export const BACKDROP_SUPPORT_MIN = 5;
 /** Лот не ниже флора, если он в пределах 0.5% от минимального листинга. */
 export const ORDER_BOOK_FLOOR_SPREAD = 0.005;
@@ -1299,128 +1295,6 @@ export interface ScopedLotEvaluation {
   verdict: DealVerdict & { scope: StatsWithConfidence['scope'] };
 }
 
-type BackdropDiag = Pick<
-  DealVerdict['metrics'],
-  | 'backdropMedian'
-  | 'backdropSamples7'
-  | 'backdropSamples30'
-  | 'backdropRatio'
-  | 'backdropRatioClamped'
-  | 'backdropTier'
-  | 'backdropShiftFactor'
-  | 'backdropAdjustment'
-  | 'backdropAdjustmentApplied'
->;
-
-function withBackdropDiag(
-  s: ScopedLotEvaluation,
-  diag: BackdropDiag,
-): ScopedLotEvaluation {
-  return {
-    ...s,
-    verdict: {
-      ...s.verdict,
-      metrics: { ...s.verdict.metrics, ...diag },
-    },
-  };
-}
-
-/**
- * Пересчёт buy/watch/skip от нового ориентира. Пороги те же, что в decideFromSales.
- * Слабый/ненадёжный срез не превращаем в самостоятельный вердикт.
- */
-function repriceToReference(
-  s: ScopedLotEvaluation,
-  referencePrice: number,
-  feeRate: number,
-  collection: string,
-  days: number,
-  diag: BackdropDiag,
-): ScopedLotEvaluation {
-  if (
-    s.verdict.evidence === 'insufficient' ||
-    s.verdict.evidence === 'weak' ||
-    s.verdict.reason.includes('медиана ненадёжна')
-  ) {
-    return withBackdropDiag(s, diag);
-  }
-
-  const listingPrice = s.verdict.metrics.listingPrice;
-  const book = s.verdict.metrics.orderBookMetrics ?? null;
-  const cappedReference = capReferenceByFloor(referencePrice, book);
-  const discount = discountVsMedian(listingPrice, cappedReference);
-  const margin = netMargin(listingPrice, cappedReference, feeRate);
-  const metrics: DealVerdict['metrics'] = {
-    ...s.verdict.metrics,
-    ...diag,
-    referencePrice: cappedReference,
-    discountVsMedian: discount,
-    netMargin: margin,
-    orderBookMetrics: book
-      ? {
-          ...book,
-          referenceCapped:
-            book.referenceCapped || cappedReference < referencePrice - 1e-9,
-        }
-      : book,
-  };
-  const draft: ScopedLotEvaluation = {
-    ...s,
-    verdict: { ...s.verdict, metrics },
-  };
-  const action = priceActionFromMetrics(draft);
-  if (!action) return draft;
-  if (
-    action === s.verdict.action &&
-    Math.abs(referencePrice - s.verdict.metrics.referencePrice) < 1e-6
-  ) {
-    return draft;
-  }
-
-  const pct = Math.round(Math.abs(discount) * 100);
-  const marginPct = Math.round(margin * 100);
-  const feePct = Math.round(feeRate * 1000) / 10;
-  const adjPct = Math.round((diag.backdropAdjustment ?? 0) * 100);
-  const trendNote = s.verdict.metrics.trendAdjusted
-    ? `; свежий рынок ${RECENT_WINDOW_DAYS}д`
-    : '';
-  const adjNote = `; фон ${adjPct >= 0 ? '+' : ''}${adjPct}% (${diag.backdropSamples7} продаж model+backdrop)${trendNote}`;
-
-  let next = draft;
-  let nextAction = action;
-  let nextReason = `цена около медианы с учётом фона${adjNote}`;
-  if (action === 'buy') {
-    const illiquid = liquidityBlockReason(collection, s.model?.trim() ?? '', days);
-    if (illiquid) {
-      nextAction = 'skip';
-      nextReason = illiquid;
-    } else {
-      nextReason = `дешевле медианы с учётом фона на ${pct}%, после комиссии ${feePct}% маржа ~${marginPct}%${adjNote}`;
-    }
-  } else if (action === 'watch') {
-    nextReason = `дисконт к медиане с учётом фона ${pct}%, маржа после ${feePct}% — ${marginPct}%${adjNote}`;
-  } else if (discount < -0.05) {
-    nextReason = `дороже медианы с учётом фона на ${pct}%${adjNote}`;
-  } else if (margin < 0) {
-    nextReason = `после комиссии ${feePct}% перепродажа в минус (маржа ${marginPct}%)${adjNote}`;
-  }
-  next = withAction(draft, nextAction, nextReason);
-  const veto = applyOrderBookVeto(
-    next.verdict.action,
-    next.verdict.reason,
-    listingPrice,
-    feeRate,
-    next.verdict.metrics.orderBookMetrics ?? null,
-  );
-  if (veto.action === next.verdict.action && veto.reason === next.verdict.reason) {
-    return next;
-  }
-  if (veto.action !== 'buy' && veto.action !== 'watch' && veto.action !== 'skip') {
-    return next;
-  }
-  return withAction(next, veto.action, veto.reason);
-}
-
 /**
  * За границей коридора ratio не обрезается ступенькой, а затухает логарифмом.
  * Выше max: max + ln(1 + (raw − max)). Ниже min: min − ln(1 + (min − raw)).
@@ -1475,119 +1349,9 @@ export function selectBackdropTier(
 }
 
 /**
- * Обычный фон: ratio = ориентир model+backdrop / ориентир модели (оба уже с 3д-трендом).
- * Коридор и доля сдвига зависят от продаж 30д и 7д. За границей коридора — soft clamp.
- * Полный сдвиг и ≥10 продаж за 7д — model+backdrop может стать primary.
- * Black / Onyx Black не трогаем.
- */
-function applyOrdinaryBackdropAdjustment(
-  scopes: ScopedLotEvaluation[],
-  collection: string,
-  days: number,
-  feeRate: number,
-): ScopedLotEvaluation[] {
-  const modelSlice = scopes.find((s) => s.scope === 'model');
-  const mb = scopes.find((s) => s.scope === 'model+backdrop');
-  if (!modelSlice || !mb) return scopes;
-  if (isBackdropEnabledForAnalysis(mb.backdrop)) return scopes;
-
-  const n7 = samples7of(mb);
-  const modelAnchor = modelSlice.verdict.metrics.referencePrice;
-  const backdropPrice = mb.verdict.metrics.referencePrice;
-  const ratio =
-    modelAnchor > 0 && backdropPrice > 0 ? backdropPrice / modelAnchor : null;
-  if (ratio == null || n7 < 1) return scopes;
-
-  const n30 =
-    mb.verdict.metrics.samples30 ??
-    getStatsExact(
-      collection,
-      mb.model,
-      mb.backdrop,
-      EXTENDED_WINDOW_DAYS,
-    ).samples;
-  const tier = selectBackdropTier(n7, n30);
-  const clamped = softClampRatio(ratio, tier.min, tier.max);
-  const shift = tier.shiftFactor;
-  const factor = 1 + shift * (clamped - 1);
-  const adjustment = factor - 1;
-  const fullLead =
-    shift >= 1 && n7 >= MIN_SAMPLES_TO_EVALUATE && usableForPrimary(mb);
-  const repriceTarget = fullLead ? mb : modelSlice;
-  const canReprice =
-    shift > 0 &&
-    repriceTarget.verdict.evidence !== 'insufficient' &&
-    repriceTarget.verdict.evidence !== 'weak' &&
-    !repriceTarget.verdict.reason.includes('медиана ненадёжна');
-  const applied = canReprice && Math.abs(adjustment) > 1e-9;
-  const diag = backdropDiag(mb, ratio, adjustment, applied, {
-    samples30: n30,
-    clamped,
-    tier: tier.id,
-    shiftFactor: shift,
-  });
-
-  let nextModel = modelSlice;
-  let nextMb = mb;
-  if (canReprice) {
-    const newRef = modelAnchor * factor;
-    if (fullLead) {
-      nextMb = repriceToReference(mb, newRef, feeRate, collection, days, diag);
-      nextModel = withBackdropDiag(modelSlice, diag);
-    } else {
-      nextModel = repriceToReference(
-        modelSlice,
-        newRef,
-        feeRate,
-        collection,
-        days,
-        diag,
-      );
-      nextMb = withBackdropDiag(mb, diag);
-    }
-  } else {
-    nextModel = withBackdropDiag(modelSlice, diag);
-    nextMb = withBackdropDiag(mb, diag);
-  }
-
-  return scopes.map((s) => {
-    if (s.scope === 'model') return nextModel;
-    if (s.scope === 'model+backdrop') return nextMb;
-    return s;
-  });
-}
-
-function backdropDiag(
-  mb: ScopedLotEvaluation,
-  ratio: number | null,
-  adjustment: number | null,
-  applied: boolean,
-  extra?: {
-    samples30?: number | null;
-    clamped?: number | null;
-    tier?: 'low' | 'mid' | 'high' | null;
-    shiftFactor?: number | null;
-  },
-): BackdropDiag {
-  const m = mb.verdict.metrics;
-  return {
-    backdropMedian: m.referencePrice > 0 ? m.referencePrice : (m.median7 ?? null),
-    backdropSamples7: m.samples7 ?? m.samples,
-    backdropSamples30: extra?.samples30 ?? m.samples30 ?? null,
-    backdropRatio: ratio,
-    backdropRatioClamped: extra?.clamped ?? null,
-    backdropTier: extra?.tier ?? null,
-    backdropShiftFactor: extra?.shiftFactor ?? null,
-    backdropAdjustment: adjustment,
-    backdropAdjustmentApplied: applied,
-  };
-}
-
-/**
- * Четыре среза по одному лоту (без отката getStatsSmart):
- * коллекция, модель и — если фон указан — коллекция+фон и модель+фон.
- * Для обычного фона model+backdrop только корректирует цену (см. applyOrdinaryBackdropAdjustment).
- * Black / Onyx Black по-прежнему решаются в pickPremiumBackdropVerdict.
+ * Срезы лота (без отката getStatsSmart).
+ * Обычный фон не входит в цену: только коллекция и модель.
+ * Black / Onyx Black — ещё коллекция+фон и модель+фон.
  */
 export function evaluateLotAllScopes(
   collection: string,
@@ -1606,7 +1370,7 @@ export function evaluateLotAllScopes(
   if (modelTrimmed) {
     slices.push({ model: modelTrimmed, backdrop: null });
   }
-  if (backdropTrimmed) {
+  if (backdropTrimmed && isBackdropEnabledForAnalysis(backdropTrimmed)) {
     slices.push({ model: null, backdrop: backdropTrimmed });
     if (modelTrimmed) {
       slices.push({ model: modelTrimmed, backdrop: backdropTrimmed });
@@ -1630,7 +1394,7 @@ export function evaluateLotAllScopes(
       verdict,
     };
   });
-  return applyOrdinaryBackdropAdjustment(scoped, collection, days, feeRate);
+  return scoped;
 }
 
 /**
@@ -1845,16 +1609,6 @@ function pickPremiumBackdropVerdict(
   };
 }
 
-/** Обычный model+backdrop с ≥10 продажами за 7д — основной ориентир, не автоматический buy. */
-function modelBackdropCanLead(s: ScopedLotEvaluation): boolean {
-  if (s.scope !== 'model+backdrop') return false;
-  if (isBackdropEnabledForAnalysis(s.backdrop)) return false;
-  if (samples7of(s) < MIN_SAMPLES_TO_EVALUATE) return false;
-  const shift = s.verdict.metrics.backdropShiftFactor;
-  if (shift != null && shift < 1) return false;
-  return usableForPrimary(s);
-}
-
 /**
  * Надёжный более узкий skip со свежим рынком (3д) отменяет широкий buy.
  * weak/insufficient и skip без trendAdjusted сюда не входят.
@@ -1879,12 +1633,6 @@ function freshMarketSkip(
     return false;
   }
   return true;
-}
-
-/** Коллекция+фон и тонкий model+backdrop в обычный primary не идут: фон либо лидер, либо поправка к модели. */
-function usableOrdinaryScope(s: ScopedLotEvaluation): boolean {
-  if (s.scope === 'model+backdrop' || s.scope === 'collection+backdrop') return false;
-  return usableForPrimary(s);
 }
 
 function mergeBackdropDiag(
@@ -1920,11 +1668,8 @@ function mergeBackdropDiag(
 /**
  * Итог по лоту.
  * Black / Onyx Black — pickPremiumBackdropVerdict.
- * Иначе при ≥10 продажах model+backdrop этот срез и есть ориентир.
- * Дальше usable = reliable или стабильный extended, без срезов фона:
- * сначала buy, потом watch, потом skip, внутри — самый узкий.
- * Надёжный skip модели со свежим рынком (trendAdjusted) отменяет buy коллекции.
- * Сильный минус более узкого среза по-прежнему снижает buy.
+ * Обычный фон в цену не входит: usable-модель задаёт итог, коллекция только если модели нет.
+ * Надёжный skip модели со свежим рынком (trendAdjusted) и сильный минус узкого среза по-прежнему снижают buy.
  */
 export function pickPrimaryLotVerdict(
   scoped: ScopedLotEvaluation[],
@@ -1933,36 +1678,30 @@ export function pickPrimaryLotVerdict(
   if (premium) return premium;
 
   const notes: string[] = [];
-  const mb = scoped.find((s) => s.scope === 'model+backdrop');
+  const modelSlice = scoped.find((s) => s.scope === 'model');
+  const collectionSlice = scoped.find((s) => s.scope === 'collection');
   let picked: ScopedLotEvaluation | null = null;
 
-  if (mb && modelBackdropCanLead(mb)) {
-    picked = mb;
-    notes.push(
-      `основной сигнал — модель+фон (${samples7of(mb)} за 7д, медиана ${mb.verdict.metrics.referencePrice.toFixed(2)} TON)`,
-    );
-  } else {
-    if (mb && !isBackdropEnabledForAnalysis(mb.backdrop)) {
-      const n = samples7of(mb);
-      const tier = mb.verdict.metrics.backdropTier;
-      const shift = mb.verdict.metrics.backdropShiftFactor;
-      if (tier && shift != null && shift < 1) {
-        notes.push(
-          `модель+фон ${tier}: сдвиг ${Math.round(shift * 100)}% отклонения (${n} за 7д), не полная замена модели`,
-        );
-      }
+  if (modelSlice && usableForPrimary(modelSlice)) {
+    picked = modelSlice;
+    const collectionAction = collectionSlice?.verdict.action;
+    if (
+      collectionSlice &&
+      usableForPrimary(collectionSlice) &&
+      collectionAction !== modelSlice.verdict.action &&
+      (collectionAction === 'buy' || collectionAction === 'watch')
+    ) {
+      notes.push(
+        `коллекция (${collectionAction}) не повышает вердикт модели`,
+      );
     }
-    const usable = scoped.filter(usableOrdinaryScope);
-    if (usable.length === 0) return null;
-    const buys = usable.filter((s) => s.verdict.action === 'buy');
-    const watches = usable.filter((s) => s.verdict.action === 'watch');
-    const skips = usable.filter((s) => s.verdict.action === 'skip');
-    picked = buys.length
-      ? mostSpecific(buys)
-      : watches.length
-        ? mostSpecific(watches)
-        : mostSpecific(skips);
+  } else if (collectionSlice && usableForPrimary(collectionSlice)) {
+    picked = collectionSlice;
+    if (modelSlice) {
+      notes.push('у модели нет устойчивой выборки, итог по коллекции');
+    }
   }
+  if (!picked) return null;
 
   let evaluation = picked;
   let veto: 'hard' | 'soft' | null = null;
