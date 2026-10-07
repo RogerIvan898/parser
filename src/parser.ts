@@ -46,7 +46,7 @@ import {
   syncCollectionSnapshot,
   syncModelSnapshots,
 } from './db/market-sync.js';
-import { saveSales } from './db/storage.js';
+import { isSaleDateOlderThanHistory, saveSales } from './db/storage.js';
 import {
   isCollectionEnabledForParse,
   isHistoryFetchBackdropsEnabled,
@@ -193,6 +193,13 @@ async function syncModelFeedPages(
       );
 
       if (!paginate) break;
+
+      if (res.items.some((item) => isSaleDateOlderThanHistory(item.date))) {
+        console.log(
+          `[history] (${step}) ${logLabel}: сделка старше 30 дней по дате покупки, дальше не листаю`,
+        );
+        break;
+      }
 
       if (!res.cursor || res.items.length === 0) {
         console.log(`[history] (${step}) ${logLabel}: конец ленты`);
@@ -542,6 +549,8 @@ async function syncFeed(feed: HistoryFeedConfig): Promise<void> {
  * Не завершается, пока жив процесс.
  */
 export async function runCatalogThenHistory(): Promise<void> {
+  const { startSalesHistoryRetentionLoop } = await import('./db/sales-retention.js');
+  startSalesHistoryRetentionLoop();
   await initClient();
   const historyFeed = parseHistoryFeedConfig();
   if (resumeSkipsCatalog(historyFeed)) {

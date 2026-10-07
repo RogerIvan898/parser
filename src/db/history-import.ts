@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { NANO } from '../types.js';
 import { HISTORY_DB_FILE } from '../history-db.js';
 import { db } from './index.js';
-import { isoToTs } from './storage.js';
+import { isoToTs, saleHistoryCutoffTs } from './storage.js';
 
 const insertMrktSale = db.prepare(`
   INSERT OR IGNORE INTO sales (
@@ -54,13 +54,15 @@ export function importSalesFromHistoryDb(): number {
   let added = 0;
   const tx = db.transaction((batch: HistorySaleRow[]) => {
     for (const r of batch) {
+      const ts = isoToTs(r.date);
+      if (ts <= 0 || ts < saleHistoryCutoffTs()) continue;
       const info = insertMrktSale.run({
         id: r.id,
         collection_name: r.collection_name,
         model_name: r.model_name,
         backdrop_name: r.backdrop_name ?? '',
         amount_nano: Math.round(r.amount * NANO),
-        ts: isoToTs(r.date),
+        ts,
       });
       if (info.changes > 0) added++;
     }

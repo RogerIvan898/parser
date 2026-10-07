@@ -187,6 +187,15 @@ if (!tableExists('sales') && tableExists('sales_slim')) {
 
 db.exec(readFileSync(resolve(__dirname, 'schema.sql'), 'utf8'));
 slimSalesTable();
+if (tableExists('sales')) {
+  const cutoff = Math.floor(Date.now() / 1000) - 30 * 86400;
+  const removed = db
+    .prepare('DELETE FROM sales WHERE ts > 0 AND ts < ?')
+    .run(cutoff);
+  if (removed.changes > 0) {
+    dbLog(`sales старше 30д по дате сделки: −${removed.changes}`);
+  }
+}
 const freePages = db.pragma('freelist_count', { simple: true }) as number;
 if (freePages >= 1000) {
   db.pragma('cache_size = -8000');

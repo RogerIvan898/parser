@@ -5,10 +5,24 @@ export function nowTs(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+/** Сколько дней сделок хранить. Считается дата покупки, не момент записи в БД. */
+export const SALE_HISTORY_DAYS = 30;
+
+export function saleHistoryCutoffTs(days = SALE_HISTORY_DAYS): number {
+  return nowTs() - days * 86400;
+}
+
 export function isoToTs(iso: string): number {
   const ms = Date.parse(iso);
   if (Number.isNaN(ms)) return 0;
   return Math.floor(ms / 1000);
+}
+
+/** true, если дата самой сделки старше окна хранения. Пустая дата не считается старой. */
+export function isSaleDateOlderThanHistory(iso: string, days = SALE_HISTORY_DAYS): boolean {
+  const ts = isoToTs(iso);
+  if (ts <= 0) return false;
+  return ts < saleHistoryCutoffTs(days);
 }
 
 export function upsertCollections(collections: Collection[]): void {
@@ -94,6 +108,7 @@ export function saveSales(items: FeedItem[]): number {
       @id, @collection_name, @model_name, @backdrop_name, @amount_nano, @ts
     )
   `);
+  const cutoff = saleHistoryCutoffTs();
   let added = 0;
   const tx = db.transaction((rows: FeedItem[]) => {
     for (const item of rows) {
@@ -101,19 +116,29 @@ export function saveSales(items: FeedItem[]): number {
       const collectionName = g.collectionName || g.title;
       const modelName = g.modelName;
       if (!collectionName || !modelName) continue;
+      const ts = isoToTs(item.date);
+      if (ts <= 0 || ts < cutoff) continue;
       const info = stmt.run({
         id: item.id,
         collection_name: collectionName,
         model_name: modelName,
         backdrop_name: g.backdropName ?? '',
         amount_nano: item.amount,
-        ts: isoToTs(item.date),
+        ts,
       });
       if (info.changes > 0) added++;
     }
   });
   tx(items);
   return added;
+}
+
+/** Удаляет сделки, у которых ts — дата покупки — старше 30 дней. */
+export function pruneSalesOlderThanHistory(days = SALE_HISTORY_DAYS): number {
+  const info = db
+    .prepare('DELETE FROM sales WHERE ts > 0 AND ts < ?')
+    .run(saleHistoryCutoffTs(days));
+  return info.changes;
 }
 
 export interface FallingModelRow {

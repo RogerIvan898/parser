@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import type { FeedItem } from './types.js';
 import { NANO } from './types.js';
 import { DATA_DIR } from './store.js';
+import { isSaleDateOlderThanHistory, SALE_HISTORY_DAYS } from './db/storage.js';
 
 export const HISTORY_DB_FILE = resolve(DATA_DIR, 'history.db');
 
@@ -107,6 +108,12 @@ function initSchema(database: Database.Database): void {
   database.exec(CREATE_SALES);
   database.exec(CREATE_INDEXES);
   database.pragma(`user_version = ${DB_VERSION}`);
+  const removed = pruneHistorySalesOlderThan(database);
+  if (removed > 0) {
+    console.log(
+      `[history] удалено ${removed} продаж старше ${SALE_HISTORY_DAYS}д по дате сделки`,
+    );
+  }
   const freePages = database.pragma('freelist_count', { simple: true }) as number;
   if (freePages >= 1000) {
     database.pragma('cache_size = -8000');
@@ -114,6 +121,22 @@ function initSchema(database: Database.Database): void {
     database.exec('VACUUM');
     console.log('[history] sales сжата');
   }
+}
+
+/** Удаляет сделки старше 30 дней по полю date — это время покупки в ленте. */
+export function pruneHistorySalesOlderThan(
+  database: Database.Database,
+  days = SALE_HISTORY_DAYS,
+): number {
+  const cutoffSec = Math.floor(Date.now() / 1000) - days * 86400;
+  const info = database
+    .prepare(
+      `DELETE FROM sales
+       WHERE unixepoch(date) IS NOT NULL
+         AND unixepoch(date) < ?`,
+    )
+    .run(cutoffSec);
+  return info.changes;
 }
 
 export function insertFeedPage(
@@ -155,6 +178,7 @@ export function insertFeedPage(
     const collectionName = item.gift.collectionName || item.gift.title;
     const modelName = item.gift.modelName;
     if (!collectionName || !modelName) continue;
+    if (isSaleDateOlderThanHistory(item.date)) continue;
     const amount = nanoToTonRounded(item.amount);
     if (amount == null) continue;
     batch.push({

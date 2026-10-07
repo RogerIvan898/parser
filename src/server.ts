@@ -854,6 +854,8 @@ async function main(): Promise<void> {
 
   try {
     bootstrapMrktDb();
+    const { startSalesHistoryRetentionLoop } = await import('./db/sales-retention.js');
+    startSalesHistoryRetentionLoop();
   } catch (err) {
     console.error('[server] не удалось инициализировать БД:', err);
   }
