@@ -46,6 +46,8 @@ export const RADAR_DEALS_FILE = resolve(DATA_DIR, 'radar-deals.json');
 export const SALING_BUYS_CSV = resolve(DATA_DIR, 'saling-buys.csv');
 /** Почему купили или не купили каждый разобранный лот. */
 export const SALING_VERDICT_LOG = resolve(DATA_DIR, 'saling-verdicts.log');
+/** Каждая попытка POST /gifts/buy: купили или почему нет. */
+export const SALING_PURCHASE_LOG = resolve(DATA_DIR, 'purchases.log');
 
 const ANALYSIS_DAYS = 7;
 /** Коллекции не разбираем и не покупаем в сканере лотов. */
@@ -627,6 +629,11 @@ function appendBuyCsvLog(
   return true;
 }
 
+function appendPurchaseLog(line: string): void {
+  mkdirSync(DATA_DIR, { recursive: true });
+  appendFileSync(SALING_PURCHASE_LOG, `${line}\n`, 'utf-8');
+}
+
 /** Покупка только тех buy, которые только что дописаны в saling-buys.csv. */
 async function buyLoggedLot(
   gift: Gift,
@@ -634,8 +641,24 @@ async function buyLoggedLot(
   priceTon: number,
 ): Promise<{ ok: true; detail: string } | { ok: false; detail: string }> {
   const listingId = (gift.id || gift.giftIdString || '').trim();
+  const model = gift.modelName || gift.modelTitle || '';
+  const backdrop = gift.backdropName?.trim() ?? '';
+  const at = new Date().toISOString();
+  const head = `${collection} | ${model || '—'} | ${backdrop || '—'} | ${priceTon.toFixed(3)} TON | ${listingId || '—'}`;
+
+  const finish = (
+    ok: boolean,
+    detail: string,
+  ): { ok: true; detail: string } | { ok: false; detail: string } => {
+    const line = `[${at}] ${ok ? 'OK' : 'FAIL'} ${head} — ${detail}`;
+    appendPurchaseLog(line);
+    if (ok) console.log(`[saling] ${detail} ${collection} id=${listingId}`);
+    else console.error(`[saling] не купили ${collection} id=${listingId}: ${detail}`);
+    return ok ? { ok: true, detail } : { ok: false, detail };
+  };
+
   if (!listingId || !Number.isFinite(gift.salePrice) || gift.salePrice <= 0) {
-    return { ok: false, detail: 'нет id или цены лота' };
+    return finish(false, 'нет id или цены лота, запрос покупки не отправлен');
   }
   try {
     const result = await purchaseGiftsWithRetry([listingId], {
@@ -643,16 +666,19 @@ async function buyLoggedLot(
       retries: 1,
       timeoutMs: 25_000,
     });
-    const paidNano = result.buy[0]?.price;
-    const detail =
+    const item = result.buy[0];
+    if (!item) {
+      return finish(false, 'API gifts/buy вернул пустой ответ, списания нет');
+    }
+    const paidNano = item.price;
+    return finish(
+      true,
       `куплено, лимит ${priceTon.toFixed(3)} TON` +
-      (paidNano != null ? `, списано ${paidNano} nano` : '');
-    console.log(`[saling] ${detail} ${collection} id=${listingId}`);
-    return { ok: true, detail };
+        (paidNano != null ? `, списано ${paidNano} nano` : '') +
+        (item.type ? `, type=${item.type}` : ''),
+    );
   } catch (err) {
-    const detail = (err as Error).message;
-    console.error(`[saling] не купили ${collection} id=${listingId}: ${detail}`);
-    return { ok: false, detail };
+    return finish(false, (err as Error).message);
   }
 }
 
@@ -1080,7 +1106,7 @@ export async function runSalingScannerLoop(): Promise<void> {
         `[saling] сканер включён (лента новых лотов, ordering=None, count=20): ` +
           `~${SALING_SCANNER_INTERVAL_MS}ms ±${SALING_SCANNER_JITTER_MS}ms → ` +
           `buy: ${PROFIT_DEALS_FILE} + ${SALING_BUYS_CSV}, watch: ${RADAR_DEALS_FILE}, ` +
-          `вердикты: ${SALING_VERDICT_LOG}`,
+          `вердикты: ${SALING_VERDICT_LOG}, покупки: ${SALING_PURCHASE_LOG}`,
       );
     }
     if (!on && wasOn) {
