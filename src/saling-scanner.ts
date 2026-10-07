@@ -9,6 +9,7 @@ import { resolve } from 'node:path';
 import {
   fetchSalingWithRetry,
   makeSalingScannerFeedRequest,
+  purchaseGiftsWithRetry,
 } from './client.js';
 import type { Gift } from './types.js';
 import { nanoToTon } from './types.js';
@@ -45,6 +46,8 @@ export const RADAR_DEALS_FILE = resolve(DATA_DIR, 'radar-deals.json');
 export const SALING_BUYS_CSV = resolve(DATA_DIR, 'saling-buys.csv');
 
 const ANALYSIS_DAYS = 7;
+/** Коллекции не разбираем и не покупаем в сканере лотов. */
+const IGNORED_PURCHASE_COLLECTIONS = new Set(['Mirage Lamp']);
 const MAX_RECORDS = 400;
 const DEALS_STORE_VERSION = 4;
 
@@ -599,8 +602,8 @@ function appendBuyCsvLog(
   collection: string,
   priceTon: number,
   confidence: string,
-): void {
-  if (confidence !== 'medium' && confidence !== 'high') return;
+): boolean {
+  if (confidence !== 'medium' && confidence !== 'high') return false;
 
   const model = gift.modelName || gift.modelTitle || '';
   const backdrop = gift.backdropName?.trim() ?? '';
@@ -619,6 +622,33 @@ function appendBuyCsvLog(
   }
   appendFileSync(SALING_BUYS_CSV, `${line}\n`, 'utf-8');
   console.log(`[saling] buy,${line}`);
+  return true;
+}
+
+/** Покупка только тех buy, которые только что дописаны в saling-buys.csv. */
+async function buyLoggedLot(
+  gift: Gift,
+  collection: string,
+  priceTon: number,
+): Promise<void> {
+  const listingId = (gift.id || gift.giftIdString || '').trim();
+  if (!listingId || !Number.isFinite(gift.salePrice) || gift.salePrice <= 0) return;
+  try {
+    const result = await purchaseGiftsWithRetry([listingId], {
+      maxPriceNano: { [listingId]: gift.salePrice },
+      retries: 1,
+      timeoutMs: 25_000,
+    });
+    const paidNano = result.buy[0]?.price;
+    console.log(
+      `[saling] куплено ${collection} id=${listingId} лимит ${priceTon.toFixed(3)} TON` +
+        (paidNano != null ? `, списано ${paidNano} nano` : ''),
+    );
+  } catch (err) {
+    console.error(
+      `[saling] не купили ${collection} id=${listingId}: ${(err as Error).message}`,
+    );
+  }
 }
 
 function logSalingLotAnalysis(
@@ -709,6 +739,7 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
   for (const gift of res.gifts) {
     const collection = gift.collectionName || gift.title;
     if (!collection || !isCollectionEnabledForParse(collection)) continue;
+    if (IGNORED_PURCHASE_COLLECTIONS.has(collection.trim())) continue;
 
     analyzed++;
     const listingTon = nanoToTon(gift.salePrice);
@@ -748,12 +779,13 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
       buyLots++;
       if (upsertAnalysisDeal(profitStore, record)) {
         profitAdded++;
-        appendBuyCsvLog(
+        const logged = appendBuyCsvLog(
           gift,
           collection,
           listingTon,
           record.primary.confidence,
         );
+        if (logged) await buyLoggedLot(gift, collection, listingTon);
       }
     } else if (action === 'watch') {
       watchLots++;
