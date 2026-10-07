@@ -99,6 +99,10 @@ export interface DealVerdict {
     backdropShiftFactor?: number | null;
     backdropAdjustment?: number | null;
     backdropAdjustmentApplied?: boolean;
+    comboConfigured?: boolean;
+    comboMedian?: number | null;
+    comboSamples7?: number | null;
+    comboSource?: 'sales' | null;
     orderBookMetrics?: {
       activeFloor: number;
       cheaperListingsCount: number;

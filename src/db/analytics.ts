@@ -2,6 +2,7 @@ import {
   getBackdropAdjustmentConfig,
   getBullishMarginPremium,
   getSalesVerdictThresholds,
+  findStyleCombo,
   isBackdropEnabledForAnalysis,
   type BackdropAdjustmentConfig,
 } from '../parse-config.js';
@@ -104,6 +105,13 @@ export interface DealVerdict {
     backdropAdjustmentApplied?: boolean;
     /** Активный стакан этого среза. null — стакан не передавали. */
     orderBookMetrics?: OrderBookMetrics | null;
+    /** true — в styleCombos есть эта модель и этот фон. */
+    comboConfigured?: boolean;
+    /** Медиана продаж именно model+backdrop. */
+    comboMedian?: number | null;
+    comboSamples7?: number | null;
+    /** sales — этой медианой задан итог. null — продаж combo не хватило. */
+    comboSource?: 'sales' | null;
   };
 }
 
@@ -1234,7 +1242,10 @@ export function decideFromSales(
   }
 
   if (priceOk) {
-    const illiquid = liquidityBlockReason(collection, modelTrimmed, days);
+    const illiquid =
+      stats7.scope === 'model+backdrop'
+        ? null
+        : liquidityBlockReason(collection, modelTrimmed, days);
     if (illiquid) {
       return {
         action: 'skip',
@@ -1351,6 +1362,7 @@ export function selectBackdropTier(
 /**
  * Срезы лота (без отката getStatsSmart).
  * Обычный фон не входит в цену: только коллекция и модель.
+ * Ручная комбинация добавляет model+backdrop как отдельный рынок.
  * Black / Onyx Black — ещё коллекция+фон и модель+фон.
  */
 export function evaluateLotAllScopes(
@@ -1370,11 +1382,20 @@ export function evaluateLotAllScopes(
   if (modelTrimmed) {
     slices.push({ model: modelTrimmed, backdrop: null });
   }
-  if (backdropTrimmed && isBackdropEnabledForAnalysis(backdropTrimmed)) {
+  const premiumBackdrop =
+    Boolean(backdropTrimmed) && isBackdropEnabledForAnalysis(backdropTrimmed);
+  const manualCombo =
+    Boolean(modelTrimmed) &&
+    Boolean(backdropTrimmed) &&
+    !premiumBackdrop &&
+    findStyleCombo(collection, modelTrimmed, backdropTrimmed) != null;
+  if (premiumBackdrop) {
     slices.push({ model: null, backdrop: backdropTrimmed });
     if (modelTrimmed) {
       slices.push({ model: modelTrimmed, backdrop: backdropTrimmed });
     }
+  } else if (manualCombo) {
+    slices.push({ model: modelTrimmed, backdrop: backdropTrimmed });
   }
 
   const scoped = slices.map((s) => {
@@ -1665,11 +1686,33 @@ function mergeBackdropDiag(
   };
 }
 
+function withComboMarket(
+  evaluation: ScopedLotEvaluation,
+  comboSlice: ScopedLotEvaluation,
+  source: 'sales' | null,
+): ScopedLotEvaluation {
+  const m = comboSlice.verdict.metrics;
+  return {
+    ...evaluation,
+    verdict: {
+      ...evaluation.verdict,
+      metrics: {
+        ...evaluation.verdict.metrics,
+        comboConfigured: true,
+        comboMedian: m.referencePrice > 0 ? m.referencePrice : (m.median7 ?? null),
+        comboSamples7: m.samples7 ?? m.samples,
+        comboSource: source,
+      },
+    },
+  };
+}
+
 /**
  * Итог по лоту.
  * Black / Onyx Black — pickPremiumBackdropVerdict.
- * Обычный фон в цену не входит: usable-модель задаёт итог, коллекция только если модели нет.
- * Надёжный skip модели со свежим рынком (trendAdjusted) и сильный минус узкого среза по-прежнему снижают buy.
+ * Ручная комбинация с достаточной выборкой model+фон — этот срез и есть итог.
+ * Иначе обычный фон в цену не входит: модель, затем коллекция.
+ * Надёжный skip модели со свежим рынком и сильный минус узкого среза снижают широкий buy.
  */
 export function pickPrimaryLotVerdict(
   scoped: ScopedLotEvaluation[],
@@ -1678,6 +1721,23 @@ export function pickPrimaryLotVerdict(
   if (premium) return premium;
 
   const notes: string[] = [];
+  const comboSlice = scoped.find((s) => s.scope === 'model+backdrop');
+  if (comboSlice && usableForPrimary(comboSlice)) {
+    const med = comboSlice.verdict.metrics.referencePrice;
+    notes.push(
+      `комбинация — отдельный рынок: медиана model+фон ${med.toFixed(2)} TON (${samples7of(comboSlice)} за 7д); модель и коллекция её не отменяют`,
+    );
+    return {
+      evaluation: withComboMarket(comboSlice, comboSlice, 'sales'),
+      confidence: comboSlice.verdict.metrics.confidence,
+      notes,
+    };
+  }
+  if (comboSlice) {
+    notes.push(
+      `комбинация настроена, продаж model+фон недостаточно (${samples7of(comboSlice)} за 7д), итог без этого фона`,
+    );
+  }
   const modelSlice = scoped.find((s) => s.scope === 'model');
   const collectionSlice = scoped.find((s) => s.scope === 'collection');
   let picked: ScopedLotEvaluation | null = null;
@@ -1775,6 +1835,7 @@ export function pickPrimaryLotVerdict(
   }
 
   evaluation = mergeBackdropDiag(evaluation, scoped);
+  if (comboSlice) evaluation = withComboMarket(evaluation, comboSlice, null);
   return {
     evaluation,
     confidence: evaluation.verdict.metrics.confidence,

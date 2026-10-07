@@ -191,6 +191,22 @@ export async function getRadarDeals(limit = 80) {
   return data;
 }
 
+export interface StyleCombo {
+  collection: string;
+  model: string;
+  backdrop: string;
+}
+
+export async function getStyleCombos(): Promise<StyleCombo[]> {
+  const { data } = await api.get('/style-combos');
+  return Array.isArray(data.combos) ? data.combos : [];
+}
+
+export async function saveStyleCombos(combos: StyleCombo[]): Promise<StyleCombo[]> {
+  const { data } = await api.put('/style-combos', { combos });
+  return Array.isArray(data.combos) ? data.combos : [];
+}
+
 export async function analyzeLot(payload: {
   collection: string;
   model?: string | null;

@@ -88,3 +88,41 @@ test('Black по-прежнему считает срезы с фоном', () =
   assert.ok(result.scopes.some((s) => s.scope === 'collection+backdrop'));
   assert.ok(result.scopes.some((s) => s.scope === 'model+backdrop'));
 });
+
+test('ручная комбинация с достаточными продажами фона не смотрит на медиану модели', async () => {
+  const { listStyleCombos, saveStyleCombos } = await import('../parse-config.js');
+  const prev = listStyleCombos();
+  const now = Math.floor(Date.now() / 1000);
+  const collection = 'Combo Basket';
+  const model = 'Bear Market';
+  const backdrop = 'Hunter Green';
+  let i = 0;
+  for (let n = 0; n < 20; n++) {
+    addSale(collection, model, 'Azure', 4, now - 2 * 86400, `cm-${i++}`);
+  }
+  for (let n = 0; n < 12; n++) {
+    addSale(collection, model, backdrop, 10, now - 2 * 86400, `cb-${i++}`);
+  }
+
+  const plain = analyzeLot(collection, model, backdrop, 6, 7, 0.02);
+  assert.equal(plain.scopes.some((s) => s.scope === 'model+backdrop'), false);
+  assert.equal(plain.primary?.scope, 'model');
+  assert.equal(plain.primary?.action, 'skip');
+
+  saveStyleCombos([...prev, { collection, model, backdrop }]);
+  try {
+    const result = analyzeLot(collection, model, backdrop, 6, 7, 0.02);
+    const combo = result.scopes.find((s) => s.scope === 'model+backdrop');
+    const modelSlice = result.scopes.find((s) => s.scope === 'model');
+    assert.ok(combo);
+    assert.equal(combo.verdict.action, 'buy');
+    assert.ok(Math.abs(combo.verdict.metrics.referencePrice - 10) < 0.05);
+    assert.equal(modelSlice?.verdict.action, 'skip');
+    assert.equal(result.primary?.scope, 'model+backdrop');
+    assert.equal(result.primary?.action, 'buy');
+    assert.equal(result.primary?.metrics.comboSource, 'sales');
+    assert.equal(result.primary?.metrics.comboConfigured, true);
+  } finally {
+    saveStyleCombos(prev);
+  }
+});

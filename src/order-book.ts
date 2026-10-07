@@ -7,7 +7,7 @@ import {
   isPotentiallyProfitableScoped,
   type ActiveListing,
 } from './db/analytics.js';
-import { isBackdropEnabledForAnalysis } from './parse-config.js';
+import { findStyleCombo, isBackdropEnabledForAnalysis } from './parse-config.js';
 import type { Gift } from './types.js';
 import { nanoToTon, withoutLockedListings } from './types.js';
 
@@ -46,8 +46,9 @@ function cacheKey(collection: string, model: string, backdrop: string): string {
 }
 
 /**
- * Стакан с MRKT. Обычный фон не фильтруется: коллекция + модель.
- * Black / Onyx Black — ещё и backdrop.
+ * Стакан с MRKT.
+ * Обычный фон: коллекция + модель.
+ * Black / Onyx Black и ручная комбинация: ещё и backdrop.
  */
 export async function loadOrderBookListings(
   collection: string,
@@ -128,7 +129,11 @@ export async function analyzeLotWithLiveOrderBook(params: {
   }
 
   try {
-    const bookBackdrop = isBackdropEnabledForAnalysis(backdrop) ? backdrop : '';
+    const bookBackdrop =
+      isBackdropEnabledForAnalysis(backdrop) ||
+      findStyleCombo(params.collection, model, backdrop)
+        ? backdrop
+        : '';
     const asks = await loadOrderBookListings(
       params.collection,
       model,

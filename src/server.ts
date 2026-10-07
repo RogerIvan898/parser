@@ -46,6 +46,9 @@ import {
 import {
   loadParseConfig,
   saveParseConfig,
+  listStyleCombos,
+  saveStyleCombos,
+  type StyleCombo,
   HISTORY_FEED_BACKDROP_NAMES,
   getParserTiming,
   getParserEnvDefaults,
@@ -347,6 +350,19 @@ api.put('/parse-config', async (req, reply) => {
   } catch (err) {
     return reply.code(500).send({ error: (err as Error).message });
   }
+});
+
+api.get('/style-combos', async (_req, reply) => {
+  return reply.send({ combos: listStyleCombos() });
+});
+
+api.put('/style-combos', async (req, reply) => {
+  const body = req.body as { combos?: unknown };
+  if (!Array.isArray(body.combos)) {
+    return reply.code(400).send({ error: 'combos должен быть массивом' });
+  }
+  const combos = saveStyleCombos(body.combos as StyleCombo[]);
+  return reply.send({ combos });
 });
 
 api.get('/profit-deals', async (req, reply) => {

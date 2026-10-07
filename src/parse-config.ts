@@ -36,6 +36,15 @@ export interface ParseConfig {
   bullishMarginPremium: number | null;
   /** null → DEFAULT_BACKDROP_ADJUSTMENT */
   backdropAdjustment: BackdropAdjustmentConfig | null;
+  /** Ручные связки коллекция+модель+фон с наценкой к цене модели. */
+  styleCombos: StyleCombo[];
+}
+
+/** Ручное объявление: эта модель с этим фоном — отдельный рынок. Цена только из его продаж. */
+export interface StyleCombo {
+  collection: string;
+  model: string;
+  backdrop: string;
 }
 
 export interface BackdropTierBand {
@@ -126,6 +135,7 @@ function emptyConfig(): ParseConfig {
     watchMinDiscount: null,
     bullishMarginPremium: null,
     backdropAdjustment: null,
+    styleCombos: [],
   };
 }
 
@@ -230,7 +240,61 @@ function normalizeConfig(raw: Partial<ParseConfig>): ParseConfig {
     watchMinDiscount: parseThresholdFraction(raw.watchMinDiscount),
     bullishMarginPremium: parseThresholdFraction(raw.bullishMarginPremium),
     backdropAdjustment: parseBackdropAdjustment(raw.backdropAdjustment),
+    styleCombos: parseStyleCombos(raw.styleCombos),
   };
+}
+
+function parseStyleCombos(value: unknown): StyleCombo[] {
+  if (!Array.isArray(value)) return [];
+  const out: StyleCombo[] = [];
+  const seen = new Set<string>();
+  for (const row of value) {
+    if (!row || typeof row !== 'object') continue;
+    const item = row as Record<string, unknown>;
+    const collection = String(item.collection ?? '').trim();
+    const model = String(item.model ?? '').trim();
+    const backdrop = String(item.backdrop ?? '').trim();
+    if (!collection || !model || !backdrop) continue;
+    const key = styleComboKey(collection, model, backdrop);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ collection, model, backdrop });
+  }
+  return out;
+}
+
+export function styleComboKey(
+  collection: string,
+  model: string,
+  backdrop: string,
+): string {
+  return `${collection.trim()}\0${model.trim()}\0${backdrop.trim()}`;
+}
+
+export function listStyleCombos(): StyleCombo[] {
+  return loadParseConfig().styleCombos;
+}
+
+export function findStyleCombo(
+  collection: string,
+  model: string | null | undefined,
+  backdrop: string | null | undefined,
+): StyleCombo | null {
+  const modelName = model?.trim() ?? '';
+  const backdropName = backdrop?.trim() ?? '';
+  if (!collection.trim() || !modelName || !backdropName) return null;
+  if (isBackdropEnabledForAnalysis(backdropName)) return null;
+  const key = styleComboKey(collection, modelName, backdropName);
+  return listStyleCombos().find(
+    (row) => styleComboKey(row.collection, row.model, row.backdrop) === key,
+  ) ?? null;
+}
+
+export function saveStyleCombos(combos: StyleCombo[]): StyleCombo[] {
+  const prev = loadParseConfig();
+  const styleCombos = parseStyleCombos(combos);
+  writeParseConfig({ ...prev, styleCombos });
+  return styleCombos;
 }
 
 function parseBandRange(value: unknown, fallback: [number, number]): [number, number] {

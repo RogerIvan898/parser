@@ -4,6 +4,7 @@ const links = [
   { to: '/history', label: 'История цен' },
   { to: '/stats', label: 'Статистика' },
   { to: '/evaluate', label: 'Оценка лота' },
+  { to: '/combos', label: 'Комбинации' },
   { to: '/liquidity', label: 'Ликвидность' },
   { to: '/scanner', label: 'Сканер / радар' },
   { to: '/settings', label: 'Настройки' },
