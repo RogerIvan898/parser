@@ -44,6 +44,8 @@ export const PROFIT_DEALS_FILE = resolve(DATA_DIR, 'profit-deals.json');
 export const RADAR_DEALS_FILE = resolve(DATA_DIR, 'radar-deals.json');
 /** CSV: цена, коллекция, модель, фон, listing id — каждый новый buy в profit-deals */
 export const SALING_BUYS_CSV = resolve(DATA_DIR, 'saling-buys.csv');
+/** Почему купили или не купили каждый разобранный лот. */
+export const SALING_VERDICT_LOG = resolve(DATA_DIR, 'saling-verdicts.log');
 
 const ANALYSIS_DAYS = 7;
 /** Коллекции не разбираем и не покупаем в сканере лотов. */
@@ -630,9 +632,11 @@ async function buyLoggedLot(
   gift: Gift,
   collection: string,
   priceTon: number,
-): Promise<void> {
+): Promise<{ ok: true; detail: string } | { ok: false; detail: string }> {
   const listingId = (gift.id || gift.giftIdString || '').trim();
-  if (!listingId || !Number.isFinite(gift.salePrice) || gift.salePrice <= 0) return;
+  if (!listingId || !Number.isFinite(gift.salePrice) || gift.salePrice <= 0) {
+    return { ok: false, detail: 'нет id или цены лота' };
+  }
   try {
     const result = await purchaseGiftsWithRetry([listingId], {
       maxPriceNano: { [listingId]: gift.salePrice },
@@ -640,15 +644,122 @@ async function buyLoggedLot(
       timeoutMs: 25_000,
     });
     const paidNano = result.buy[0]?.price;
-    console.log(
-      `[saling] куплено ${collection} id=${listingId} лимит ${priceTon.toFixed(3)} TON` +
-        (paidNano != null ? `, списано ${paidNano} nano` : ''),
-    );
+    const detail =
+      `куплено, лимит ${priceTon.toFixed(3)} TON` +
+      (paidNano != null ? `, списано ${paidNano} nano` : '');
+    console.log(`[saling] ${detail} ${collection} id=${listingId}`);
+    return { ok: true, detail };
   } catch (err) {
-    console.error(
-      `[saling] не купили ${collection} id=${listingId}: ${(err as Error).message}`,
-    );
+    const detail = (err as Error).message;
+    console.error(`[saling] не купили ${collection} id=${listingId}: ${detail}`);
+    return { ok: false, detail };
   }
+}
+
+const verdictLogSeen = new Map<string, string>();
+
+function appendVerdictLog(line: string, dedupeKey: string): void {
+  if (verdictLogSeen.has(dedupeKey)) return;
+  if (verdictLogSeen.size > 4000) verdictLogSeen.clear();
+  verdictLogSeen.set(dedupeKey, line);
+  mkdirSync(DATA_DIR, { recursive: true });
+  appendFileSync(SALING_VERDICT_LOG, `${line}\n`, 'utf-8');
+}
+
+function lotLabel(
+  collection: string,
+  model: string,
+  backdrop: string,
+  priceTon: number,
+  listingId: string,
+): string {
+  return `${collection} | ${model || '—'} | ${backdrop || '—'} | ${priceTon.toFixed(3)} TON | ${listingId || '—'}`;
+}
+
+function pctText(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '—';
+  return `${Math.round(value * 100)}%`;
+}
+
+function tonText(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value) || value <= 0) return '—';
+  return value.toFixed(2);
+}
+
+function formatScopeDetail(s: ScopedLotEvaluation): string {
+  const m = s.verdict.metrics;
+  const n7 = m.samples7 ?? m.samples;
+  const trend =
+    m.trendStatus && m.trendStatus !== 'neutral'
+      ? ` тренд ${m.trendStatus}${m.trend != null ? ` ${pctText(m.trend)}` : ''}` +
+        (m.trendAdjusted ? ' ориентир=медиана3' : '') +
+        (m.bullishDiscountApplied ? ' ориентир=haircut' : '')
+      : '';
+  const book = m.orderBookMetrics;
+  const bookPart = book
+    ? ` стакан: floor ${tonText(book.activeFloor)}, лотов ${book.activeCount}` +
+      `, дешевле ${book.cheaperListingsCount}` +
+      `, до цели ${book.listingsBelowTarget}` +
+      `, очередь ${book.liquidityOverhangDays != null ? `${book.liquidityOverhangDays.toFixed(1)}д` : '—'}` +
+      (book.referenceCapped ? ', ориентир обрезан флором' : '')
+    : '';
+  return (
+    `  ${s.scope}: ${s.verdict.action}/${s.verdict.evidence ?? '—'} ${m.confidence}` +
+    ` | ориентир ${tonText(m.referencePrice)}` +
+    ` | 7д ${tonText(m.median7)} n=${n7}` +
+    ` | 3д ${tonText(m.median3)} n=${m.samples3 ?? 0}` +
+    (m.samples30 != null ? ` | 30д n=${m.samples30}` : '') +
+    ` | дисконт ${pctText(m.discountVsMedian)} маржа ${pctText(m.netMargin)}` +
+    trend +
+    bookPart +
+    ` | ${s.verdict.reason}`
+  );
+}
+
+function writePurchaseVerdict(params: {
+  collection: string;
+  model: string;
+  backdrop: string;
+  priceTon: number;
+  listingId: string;
+  action: string;
+  bought: boolean;
+  why: string;
+  scopes?: ScopedLotEvaluation[];
+  primaryScope?: string | null;
+  evidence?: string | null;
+  confidence?: string | null;
+  notes?: string[];
+}): void {
+  const at = new Date().toISOString();
+  const head = params.bought ? 'BUY' : 'NO';
+  const primary =
+    `итог: ${params.primaryScope ?? '—'}` +
+    ` ${params.action}` +
+    (params.evidence ? `/${params.evidence}` : '') +
+    (params.confidence ? ` уверенность ${params.confidence}` : '');
+  const scopesText = (params.scopes ?? []).map(formatScopeDetail).join('\n');
+  const notesText = params.notes?.length
+    ? `заметки: ${params.notes.join('; ')}`
+    : '';
+  const body = [
+    `[${at}] ${head} ${lotLabel(params.collection, params.model, params.backdrop, params.priceTon, params.listingId)}`,
+    primary,
+    scopesText,
+    notesText,
+    params.why,
+  ]
+    .filter((part) => part.length > 0)
+    .join('\n');
+  appendVerdictLog(`${body}\n`, [
+    params.listingId,
+    params.priceTon,
+    params.action,
+    params.bought,
+    params.why,
+    scopesText,
+    notesText,
+  ].join('|'));
 }
 
 function logSalingLotAnalysis(
@@ -739,10 +850,27 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
   for (const gift of res.gifts) {
     const collection = gift.collectionName || gift.title;
     if (!collection || !isCollectionEnabledForParse(collection)) continue;
-    if (IGNORED_PURCHASE_COLLECTIONS.has(collection.trim())) continue;
+
+    const model = gift.modelName || gift.modelTitle || '';
+    const backdrop = gift.backdropName?.trim() ?? '';
+    const listingId = gift.id || gift.giftIdString || '';
+    const listingTon = nanoToTon(gift.salePrice);
+
+    if (IGNORED_PURCHASE_COLLECTIONS.has(collection.trim())) {
+      writePurchaseVerdict({
+        collection,
+        model,
+        backdrop,
+        priceTon: listingTon,
+        listingId,
+        action: 'ignored',
+        bought: false,
+        why: `не покупаем: коллекция ${collection} исключена из разбора`,
+      });
+      continue;
+    }
 
     analyzed++;
-    const listingTon = nanoToTon(gift.salePrice);
 
     const { analysis, orderBookFetched, promising } = await analyzeGiftForScan(
       gift,
@@ -761,10 +889,47 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
       (s) => s.verdict.action === 'buy',
     ).length;
     buyScopeHits += buyScopeCount;
-    if (!picked) continue;
+
+    if (!picked) {
+      writePurchaseVerdict({
+        collection,
+        model,
+        backdrop,
+        priceTon: listingTon,
+        listingId,
+        action: 'none',
+        bought: false,
+        why: 'не покупаем: нет устойчивой выборки по модели и коллекции',
+        scopes: scoped,
+      });
+      continue;
+    }
 
     const action = picked.evaluation.verdict.action;
-    if (action !== 'buy' && action !== 'watch') continue;
+    const verdictReason = picked.evaluation.verdict.reason;
+    const because = verdictReason;
+    const verdictFields = {
+      scopes: scoped,
+      primaryScope: picked.evaluation.scope,
+      evidence: picked.evaluation.verdict.evidence,
+      confidence: picked.confidence,
+      notes: picked.notes,
+    };
+
+    if (action !== 'buy' && action !== 'watch') {
+      writePurchaseVerdict({
+        collection,
+        model,
+        backdrop,
+        priceTon: listingTon,
+        listingId,
+        action,
+        bought: false,
+        why: `не покупаем: ${because}`,
+        ...verdictFields,
+      });
+      continue;
+    }
 
     const record = buildAnalysisRecord(
       gift,
@@ -777,19 +942,72 @@ export async function scanSalingOnce(): Promise<SalingScanStats> {
 
     if (action === 'buy') {
       buyLots++;
-      if (upsertAnalysisDeal(profitStore, record)) {
-        profitAdded++;
-        const logged = appendBuyCsvLog(
-          gift,
+      const stored = upsertAnalysisDeal(profitStore, record);
+      if (!stored) {
+        writePurchaseVerdict({
           collection,
-          listingTon,
-          record.primary.confidence,
-        );
-        if (logged) await buyLoggedLot(gift, collection, listingTon);
+          model,
+          backdrop,
+          priceTon: listingTon,
+          listingId,
+          action,
+          bought: false,
+          why: `не покупаем повторно: этот buy уже записан, маржа не лучше прошлой. ${because}`,
+          ...verdictFields,
+        });
+        continue;
       }
+      profitAdded++;
+      const logged = appendBuyCsvLog(
+        gift,
+        collection,
+        listingTon,
+        record.primary.confidence,
+      );
+      if (!logged) {
+        writePurchaseVerdict({
+          collection,
+          model,
+          backdrop,
+          priceTon: listingTon,
+          listingId,
+          action,
+          bought: false,
+          why:
+            `не покупаем: вердикт buy, но уверенность ${record.primary.confidence}` +
+            ` — в CSV пишем только medium/high. ${because}`,
+          ...verdictFields,
+        });
+        continue;
+      }
+      const purchase = await buyLoggedLot(gift, collection, listingTon);
+      writePurchaseVerdict({
+        collection,
+        model,
+        backdrop,
+        priceTon: listingTon,
+        listingId,
+        action,
+        bought: purchase.ok,
+        why: purchase.ok
+          ? `покупаем: ${because}. ${purchase.detail}`
+          : `вердикт buy, строка в CSV записана, покупка не прошла: ${purchase.detail}. Почему buy: ${because}`,
+        ...verdictFields,
+      });
     } else if (action === 'watch') {
       watchLots++;
       if (upsertAnalysisDeal(radarStore, record)) radarAdded++;
+      writePurchaseVerdict({
+        collection,
+        model,
+        backdrop,
+        priceTon: listingTon,
+        listingId,
+        action,
+        bought: false,
+        why: `не покупаем, только смотреть: ${because}`,
+        ...verdictFields,
+      });
     }
   }
 
@@ -861,7 +1079,8 @@ export async function runSalingScannerLoop(): Promise<void> {
       console.log(
         `[saling] сканер включён (лента новых лотов, ordering=None, count=20): ` +
           `~${SALING_SCANNER_INTERVAL_MS}ms ±${SALING_SCANNER_JITTER_MS}ms → ` +
-          `buy: ${PROFIT_DEALS_FILE} + ${SALING_BUYS_CSV}, watch: ${RADAR_DEALS_FILE}`,
+          `buy: ${PROFIT_DEALS_FILE} + ${SALING_BUYS_CSV}, watch: ${RADAR_DEALS_FILE}, ` +
+          `вердикты: ${SALING_VERDICT_LOG}`,
       );
     }
     if (!on && wasOn) {
